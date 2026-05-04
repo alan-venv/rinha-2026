@@ -1,0 +1,62 @@
+services:
+  haproxy:
+    image: haproxy:3.2.3-alpine
+    container_name: rinha-haproxy
+    ports:
+      - 9999:80
+    volumes:
+      - sockets:/sockets:rw
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - backend
+    depends_on:
+      - rinha-service-1
+      - rinha-service-2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+          memory: "32MB"
+
+  rinha-service-1:
+    image: ghcr.io/alan-venv/rinha-service-2026:latest
+    container_name: rinha-service-1
+    environment:
+      - SOCKET=/sockets/service-1.sock
+    volumes:
+      - sockets:/sockets:rw
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "159MB"
+
+  rinha-service-2:
+    image: ghcr.io/alan-venv/rinha-service-2026:latest
+    container_name: rinha-service-2
+    environment:
+      - SOCKET=/sockets/service-2.sock
+    volumes:
+      - sockets:/sockets:rw
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "159MB"
+
+volumes:
+  sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=16m,mode=1777
+
+networks:
+  backend:
+    name: rinha-net
+    driver: bridge

@@ -1,0 +1,10 @@
+{
+  "participants": ["Alan Silva"],
+  "social": [
+    "https://github.com/alan-venv",
+    "https://www.linkedin.com/in/alan-venv"
+  ],
+  "source-code-repo": "https://github.com/alan-venv/rinha-2026",
+  "stack": ["rust", "actix-web", "haproxy"],
+  "open_to_work": false
+}
