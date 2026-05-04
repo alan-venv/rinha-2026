@@ -1,0 +1,19 @@
+FROM rust:1.94-trixie AS build
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main(){}" > src/main.rs
+RUN cargo fetch
+
+COPY src ./src
+COPY resources/references.bin resources/ivf.bin resources/ivf-fraud.bin resources/ivf-legit.bin ./resources/
+RUN cargo build --release --bin rinha
+
+FROM gcr.io/distroless/cc-debian13
+WORKDIR /app
+COPY --from=build /app/target/release/rinha .
+COPY --from=build /app/resources/references.bin /app/resources/references.bin
+COPY --from=build /app/resources/ivf.bin /app/resources/ivf.bin
+COPY --from=build /app/resources/ivf-fraud.bin /app/resources/ivf-fraud.bin
+COPY --from=build /app/resources/ivf-legit.bin /app/resources/ivf-legit.bin
+ENTRYPOINT [ "./rinha" ]
