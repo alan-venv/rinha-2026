@@ -12,7 +12,7 @@ AGENTS.md
 /resources/*.bin
 
 ## tests ##
-/k6/results.json
+/test/results.json
 
 ## scripts ##
 /scripts
