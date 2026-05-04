@@ -164,7 +164,7 @@ export function handleSummary(data) {
     };
 
     return {
-        'test/results.json': JSON.stringify(result, null, 2),
+        'scripts/k6/results.json': JSON.stringify(result, null, 2),
         //stdout: textSummary(data, { indent: ' ', enableColors: true }),
     };
 }
