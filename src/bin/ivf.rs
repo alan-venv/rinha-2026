@@ -14,6 +14,9 @@ const PRIMARY_IVF_PATH: &str = "resources/ivf.bin";
 const FRAUD_IVF_PATH: &str = "resources/ivf-fraud.bin";
 const LEGIT_IVF_PATH: &str = "resources/ivf-legit.bin";
 const SAMPLE_MULTIPLIER: usize = 64;
+const PQ_SAMPLE_MULTIPLIER: usize = 64;
+
+type PqSubVector = [i16; PQ_DIMENSIONS_PER_SUBQUANTIZER];
 
 fn main() -> Result<()> {
     build_all_indexes()
@@ -48,6 +51,25 @@ fn validate_shared_config() -> Result<()> {
     validate_non_zero("centroid count", IVF_CENTROIDS)?;
     validate_non_zero("auxiliary centroid count", IVF_AUX_CENTROIDS)?;
     validate_non_zero("assignments per reference", IVF_ASSIGNMENTS_PER_REFERENCE)?;
+    validate_non_zero("PQ subquantizers", PQ_SUBQUANTIZERS)?;
+    validate_non_zero("PQ codewords", PQ_CODEWORDS)?;
+    validate_non_zero(
+        "PQ dimensions per subquantizer",
+        PQ_DIMENSIONS_PER_SUBQUANTIZER,
+    )?;
+
+    if PQ_SUBQUANTIZERS * PQ_DIMENSIONS_PER_SUBQUANTIZER != VECTOR_DIMENSIONS {
+        bail!(
+            "invalid PQ layout: {}x{} does not cover {} dimensions",
+            PQ_SUBQUANTIZERS,
+            PQ_DIMENSIONS_PER_SUBQUANTIZER,
+            VECTOR_DIMENSIONS
+        );
+    }
+
+    if PQ_CODEWORDS > u8::MAX as usize + 1 {
+        bail!("invalid PQ codewords: {} > 256", PQ_CODEWORDS);
+    }
 
     if IVF_ASSIGNMENTS_PER_REFERENCE > IVF_CENTROIDS {
         bail!(
@@ -135,11 +157,14 @@ fn build_index(
     let sample_count = SAMPLE_MULTIPLIER * centroid_count;
 
     println!(
-        "building {name} IVF: references={}, centroids={}, assignments_per_reference={}, sample={}, iterations={}, workers={}",
+        "building {name} IVF_PQ: references={}, centroids={}, assignments_per_reference={}, sample={}, pq={}x{}, codewords={}, iterations={}, workers={}",
         references.len(),
         centroid_count,
         IVF_ASSIGNMENTS_PER_REFERENCE,
         sample_count,
+        PQ_SUBQUANTIZERS,
+        PQ_DIMENSIONS_PER_SUBQUANTIZER,
+        PQ_CODEWORDS,
         IVF_ITERATIONS,
         workers,
     );
@@ -151,13 +176,24 @@ fn build_index(
         IVF_ITERATIONS,
         workers,
     );
-    let (offsets, indices) = assign_references(references, &centroids, workers);
+    let assignments = assign_references(references, &centroids, workers);
+    let codebooks =
+        train_pq_codebooks(references, &centroids, &assignments.assignments_by_position);
+    let (indices, codes) = candidate_indices_and_codes(
+        references,
+        &centroids,
+        &codebooks,
+        &assignments.offsets,
+        assignments.assignments_by_position,
+    );
     write_index(
         output,
         total_reference_count,
         &centroids,
-        &offsets,
+        &codebooks,
+        &assignments.offsets,
         &indices,
+        &codes,
     )?;
 
     println!(
@@ -165,8 +201,10 @@ fn build_index(
         output.display(),
         IVF_HEADER_LEN
             + centroids.len() * VECTOR_LEN
-            + offsets.len() * size_of::<u32>()
+            + codebooks.len() * PQ_DIMENSIONS_PER_SUBQUANTIZER * size_of::<i16>()
+            + assignments.offsets.len() * size_of::<u32>()
             + indices.len() * size_of::<u32>()
+            + codes.len()
     );
 
     Ok(())
@@ -283,7 +321,7 @@ fn assign_references(
     references: &impl ReferenceView,
     centroids: &[ReferenceVector],
     workers: usize,
-) -> (Vec<u32>, Vec<u32>) {
+) -> Assignments {
     let workers = workers.min(references.len().max(1));
     let chunk_len = references.len().div_ceil(workers);
     let chunks = thread::scope(|scope| {
@@ -340,9 +378,16 @@ fn assign_references(
     }
 
     let offsets = candidate_list_offsets(&centroid_counts);
-    let indices = candidate_indices(references, &offsets, assignments_by_position);
 
-    (offsets, indices)
+    Assignments {
+        offsets,
+        assignments_by_position,
+    }
+}
+
+struct Assignments {
+    offsets: Vec<u32>,
+    assignments_by_position: Vec<[u32; IVF_ASSIGNMENTS_PER_REFERENCE]>,
 }
 
 struct AssignmentChunk {
@@ -361,25 +406,198 @@ fn candidate_list_offsets(centroid_counts: &[u32]) -> Vec<u32> {
     offsets
 }
 
-fn candidate_indices(
+fn candidate_indices_and_codes(
     references: &impl ReferenceView,
+    centroids: &[ReferenceVector],
+    codebooks: &[PqSubVector],
     offsets: &[u32],
     assignments_by_position: Vec<[u32; IVF_ASSIGNMENTS_PER_REFERENCE]>,
-) -> Vec<u32> {
+) -> (Vec<u32>, Vec<u8>) {
     let mut cursors = offsets[..offsets.len() - 1].to_vec();
-    let mut indices = vec![0_u32; references.len() * IVF_ASSIGNMENTS_PER_REFERENCE];
+    let entry_count = references.len() * IVF_ASSIGNMENTS_PER_REFERENCE;
+    let mut indices = vec![0_u32; entry_count];
+    let mut codes = vec![0_u8; entry_count * PQ_CODE_LEN];
 
     for (position, assigned_centroids) in assignments_by_position.into_iter().enumerate() {
         let reference_index = references.index_at(position);
+        let vector = references.vector_at(position);
 
         for centroid in assigned_centroids {
             let cursor = &mut cursors[centroid as usize];
-            indices[*cursor as usize] = reference_index as u32;
+            let entry = *cursor as usize;
+            indices[entry] = reference_index as u32;
+            encode_residual(
+                &vector,
+                &centroids[centroid as usize],
+                codebooks,
+                &mut codes[entry * PQ_CODE_LEN..(entry + 1) * PQ_CODE_LEN],
+            );
             *cursor += 1;
         }
     }
 
-    indices
+    (indices, codes)
+}
+
+fn train_pq_codebooks(
+    references: &impl ReferenceView,
+    centroids: &[ReferenceVector],
+    assignments_by_position: &[[u32; IVF_ASSIGNMENTS_PER_REFERENCE]],
+) -> Vec<PqSubVector> {
+    let requested = PQ_SAMPLE_MULTIPLIER * PQ_CODEWORDS;
+    let samples = sample_residuals(
+        references,
+        centroids,
+        assignments_by_position,
+        requested.max(PQ_CODEWORDS),
+    );
+    let mut codebooks = Vec::with_capacity(PQ_SUBQUANTIZERS * PQ_CODEWORDS);
+
+    for subquantizer in 0..PQ_SUBQUANTIZERS {
+        println!(
+            "training PQ subquantizer {}/{} with {} samples",
+            subquantizer + 1,
+            PQ_SUBQUANTIZERS,
+            samples.len()
+        );
+        let mut codebook = initial_pq_codebook(&samples, subquantizer);
+
+        for _ in 0..IVF_ITERATIONS {
+            refine_pq_codebook(&samples, subquantizer, &mut codebook);
+        }
+
+        codebooks.extend(codebook);
+    }
+
+    codebooks
+}
+
+fn sample_residuals(
+    references: &impl ReferenceView,
+    centroids: &[ReferenceVector],
+    assignments_by_position: &[[u32; IVF_ASSIGNMENTS_PER_REFERENCE]],
+    requested_count: usize,
+) -> Vec<ReferenceVector> {
+    let entry_count = references.len() * IVF_ASSIGNMENTS_PER_REFERENCE;
+    let sample_count = requested_count.min(entry_count);
+    let mut samples = Vec::with_capacity(sample_count);
+
+    for sample in 0..sample_count {
+        let entry = sample * entry_count / sample_count;
+        let position = entry / IVF_ASSIGNMENTS_PER_REFERENCE;
+        let assignment = entry % IVF_ASSIGNMENTS_PER_REFERENCE;
+        let vector = references.vector_at(position);
+        let centroid = &centroids[assignments_by_position[position][assignment] as usize];
+        samples.push(residual_vector(&vector, centroid));
+    }
+
+    samples
+}
+
+fn initial_pq_codebook(samples: &[ReferenceVector], subquantizer: usize) -> Vec<PqSubVector> {
+    let mut codebook = Vec::with_capacity(PQ_CODEWORDS);
+
+    for codeword in 0..PQ_CODEWORDS {
+        let index = codeword * samples.len() / PQ_CODEWORDS;
+        codebook.push(subvector(&samples[index], subquantizer));
+    }
+
+    codebook
+}
+
+fn refine_pq_codebook(
+    samples: &[ReferenceVector],
+    subquantizer: usize,
+    codebook: &mut [PqSubVector],
+) {
+    let mut sums = vec![[0_i64; PQ_DIMENSIONS_PER_SUBQUANTIZER]; PQ_CODEWORDS];
+    let mut counts = vec![0_u32; PQ_CODEWORDS];
+
+    for sample in samples {
+        let value = subvector(sample, subquantizer);
+        let codeword = nearest_codeword(codebook, &value);
+        counts[codeword] += 1;
+
+        for dimension in 0..PQ_DIMENSIONS_PER_SUBQUANTIZER {
+            sums[codeword][dimension] += i64::from(value[dimension]);
+        }
+    }
+
+    for codeword in 0..PQ_CODEWORDS {
+        let count = counts[codeword];
+
+        if count == 0 {
+            continue;
+        }
+
+        for dimension in 0..PQ_DIMENSIONS_PER_SUBQUANTIZER {
+            codebook[codeword][dimension] = (sums[codeword][dimension] / i64::from(count)) as i16;
+        }
+    }
+}
+
+fn encode_residual(
+    vector: &ReferenceVector,
+    centroid: &ReferenceVector,
+    codebooks: &[PqSubVector],
+    output: &mut [u8],
+) {
+    let residual = residual_vector(vector, centroid);
+
+    for (subquantizer, byte) in output.iter_mut().enumerate() {
+        let value = subvector(&residual, subquantizer);
+        let start = subquantizer * PQ_CODEWORDS;
+        *byte = nearest_codeword(&codebooks[start..start + PQ_CODEWORDS], &value) as u8;
+    }
+}
+
+fn residual_vector(vector: &ReferenceVector, centroid: &ReferenceVector) -> ReferenceVector {
+    let mut residual = [0; VECTOR_DIMENSIONS];
+
+    for dimension in 0..VECTOR_DIMENSIONS {
+        residual[dimension] = vector[dimension].saturating_sub(centroid[dimension]);
+    }
+
+    residual
+}
+
+fn subvector(vector: &ReferenceVector, subquantizer: usize) -> PqSubVector {
+    let mut output = [0; PQ_DIMENSIONS_PER_SUBQUANTIZER];
+    let start = subquantizer * PQ_DIMENSIONS_PER_SUBQUANTIZER;
+
+    output.copy_from_slice(&vector[start..start + PQ_DIMENSIONS_PER_SUBQUANTIZER]);
+    output
+}
+
+fn nearest_codeword(codebook: &[PqSubVector], value: &PqSubVector) -> usize {
+    let mut nearest = 0;
+    let mut nearest_distance = u64::MAX;
+
+    for (index, codeword) in codebook.iter().enumerate() {
+        let distance = pq_distance2_limited(value, codeword, nearest_distance);
+
+        if distance < nearest_distance {
+            nearest = index;
+            nearest_distance = distance;
+        }
+    }
+
+    nearest
+}
+
+fn pq_distance2_limited(a: &PqSubVector, b: &PqSubVector, limit: u64) -> u64 {
+    let mut distance = 0;
+
+    for (left, right) in a.iter().zip(b) {
+        let delta = i64::from(*left) - i64::from(*right);
+        distance += (delta * delta) as u64;
+
+        if distance >= limit {
+            return distance;
+        }
+    }
+
+    distance
 }
 
 fn nearest_centroid(centroids: &[ReferenceVector], vector: &ReferenceVector) -> usize {
@@ -465,8 +683,10 @@ fn write_index(
     output: &Path,
     reference_count: usize,
     centroids: &[ReferenceVector],
+    codebooks: &[PqSubVector],
     offsets: &[u32],
     indices: &[u32],
+    codes: &[u8],
 ) -> Result<()> {
     let output_file = File::create(output)?;
     let mut writer = BufWriter::new(output_file);
@@ -474,9 +694,18 @@ fn write_index(
     writer.write_all(&(reference_count as u64).to_le_bytes())?;
     writer.write_all(&(centroids.len() as u32).to_le_bytes())?;
     writer.write_all(&(indices.len() as u64).to_le_bytes())?;
+    writer.write_all(&(PQ_SUBQUANTIZERS as u32).to_le_bytes())?;
+    writer.write_all(&(PQ_CODEWORDS as u32).to_le_bytes())?;
+    writer.write_all(&(PQ_DIMENSIONS_PER_SUBQUANTIZER as u32).to_le_bytes())?;
 
     for centroid in centroids {
         for value in centroid {
+            writer.write_all(&value.to_le_bytes())?;
+        }
+    }
+
+    for codeword in codebooks {
+        for value in codeword {
             writer.write_all(&value.to_le_bytes())?;
         }
     }
@@ -489,6 +718,7 @@ fn write_index(
         writer.write_all(&index.to_le_bytes())?;
     }
 
+    writer.write_all(codes)?;
     writer.flush()?;
     Ok(())
 }

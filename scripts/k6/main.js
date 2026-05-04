@@ -4,11 +4,11 @@ import { SharedArray } from 'k6/data';
 import { Counter } from 'k6/metrics';
 import exec from 'k6/execution';
 
-const testData = new SharedArray('test-data', function () {
-    return JSON.parse(open('./test-data.json')).entries;
+const testData = new SharedArray('data', function () {
+    return JSON.parse(open('./data.json')).entries;
 });
 const statsArr = new SharedArray('test-stats', function () {
-    return [JSON.parse(open('./test-data.json')).stats];
+    return [JSON.parse(open('./data.json')).stats];
 });
 const expectedStats = statsArr[0];
 

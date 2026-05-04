@@ -11,11 +11,8 @@ AGENTS.md
 /resources/references.json
 /resources/*.bin
 
-## tests ##
-/test/results.json
-
 ## scripts ##
-/scripts
+/scripts/deploy.sh
 
 ## docs ##
 /docs
