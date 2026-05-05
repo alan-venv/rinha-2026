@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 mimalloc = "0.1.50"
-actix-web = "4.13.0"
+ntex = { version = "3.8.0", default-features = false, features = ["neon-uring"] }
 anyhow = "1.0.102"
 chrono = { version = "0.4.44", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }

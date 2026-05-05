@@ -7,29 +7,28 @@ mod service;
 use std::io::{Error, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use actix_web::web::Data;
-use actix_web::{App, HttpServer};
 use mimalloc::MiMalloc;
+use ntex::web::{App, HttpServer};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[actix_web::main]
+#[ntex::main]
 async fn main() -> Result<()> {
     let references = memory::load_references().map_err(Error::other)?;
-    let references = Data::new(references);
+    let references = Arc::new(references);
 
     let socket = socket();
     if socket.exists() {
         let _ = std::fs::remove_file(&socket);
     }
 
-    let server = HttpServer::new(move || {
+    let server = HttpServer::new(async move || {
         App::new()
-            .app_data(references.clone())
-            .service(controller::ready)
-            .service(controller::score)
+            .state(references.clone())
+            .service((controller::ready, controller::score))
     })
     .workers(1)
     .bind_uds(&socket)?;
