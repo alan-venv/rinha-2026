@@ -9,13 +9,11 @@ use rinha::*;
 
 const NEAREST_COUNT: usize = 5;
 
-#[allow(dead_code)]
 pub struct FraudScoreDetails {
     pub score: f32,
     pub boundary_case: bool,
 }
 
-#[allow(dead_code)]
 pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> f32 {
     fraud_score_details(vector, records).score
 }
@@ -33,16 +31,114 @@ pub fn fraud_score_details(
     }
 }
 
-fn fraud_count(nearest: &[(usize, u64)], records: &(impl ReferenceSource + ?Sized)) -> usize {
+fn fraud_count(nearest: &[NearestCandidate], records: &(impl ReferenceSource + ?Sized)) -> usize {
     nearest
         .iter()
-        .filter(|(index, _)| records.is_fraud(*index))
+        .filter(|candidate| records.is_fraud(candidate.index))
         .count()
 }
 
+#[derive(Clone, Copy)]
+struct NearestCandidate {
+    index: usize,
+    distance: u64,
+}
+
 struct NearestResult {
-    candidates: Vec<(usize, u64)>,
+    candidates: Vec<NearestCandidate>,
     boundary_case: bool,
+}
+
+struct TopNearest {
+    candidates: [NearestCandidate; NEAREST_COUNT],
+    len: usize,
+    farthest_slot: usize,
+}
+
+impl TopNearest {
+    fn new() -> Self {
+        Self {
+            candidates: [NearestCandidate {
+                index: 0,
+                distance: u64::MAX,
+            }; NEAREST_COUNT],
+            len: 0,
+            farthest_slot: 0,
+        }
+    }
+
+    fn current_worst_distance(&self) -> u64 {
+        if self.len < NEAREST_COUNT {
+            u64::MAX
+        } else {
+            self.candidates[self.farthest_slot].distance
+        }
+    }
+
+    fn add(&mut self, candidate: NearestCandidate) {
+        if self.contains(candidate.index) {
+            return;
+        }
+
+        if self.len < NEAREST_COUNT {
+            self.candidates[self.len] = candidate;
+            self.len += 1;
+
+            if candidate.distance > self.candidates[self.farthest_slot].distance {
+                self.farthest_slot = self.len - 1;
+            }
+
+            return;
+        }
+
+        if candidate.distance < self.current_worst_distance() {
+            self.candidates[self.farthest_slot] = candidate;
+            self.farthest_slot = self.find_farthest_slot();
+        }
+    }
+
+    fn is_ambiguous(&self, records: &(impl ReferenceSource + ?Sized)) -> bool {
+        if self.len < NEAREST_COUNT {
+            return true;
+        }
+
+        let frauds = self
+            .candidates
+            .iter()
+            .filter(|candidate| records.is_fraud(candidate.index))
+            .count();
+
+        frauds > 0 && frauds < NEAREST_COUNT
+    }
+
+    fn into_sorted_candidates(self) -> Vec<NearestCandidate> {
+        let mut candidates = Vec::with_capacity(self.len);
+
+        for slot in 0..self.len {
+            candidates.push(self.candidates[slot]);
+        }
+
+        candidates.sort_unstable_by_key(|candidate| candidate.distance);
+        candidates
+    }
+
+    fn contains(&self, index: usize) -> bool {
+        self.candidates[..self.len]
+            .iter()
+            .any(|candidate| candidate.index == index)
+    }
+
+    fn find_farthest_slot(&self) -> usize {
+        let mut farthest_slot = 0;
+
+        for slot in 1..self.len {
+            if self.candidates[slot].distance > self.candidates[farthest_slot].distance {
+                farthest_slot = slot;
+            }
+        }
+
+        farthest_slot
+    }
 }
 
 fn nearest(
@@ -50,98 +146,26 @@ fn nearest(
     records: &(impl ReferenceSource + ?Sized),
     probes: usize,
 ) -> NearestResult {
-    let mut nearest_indexes = [0; NEAREST_COUNT];
-    let mut nearest_distances = [u64::MAX; NEAREST_COUNT];
-    let mut nearest_len = 0;
-    let mut farthest_slot = 0;
+    let mut nearest = TopNearest::new();
     let current_worst_top_distance = Cell::new(u64::MAX);
 
-    macro_rules! collect_candidates {
-        ($method:ident) => {
-            records.$method(
-                vector,
-                probes,
-                &mut || current_worst_top_distance.get(),
-                &mut |index, distance| {
-                    if nearest_contains(&nearest_indexes, nearest_len, index) {
-                        return;
-                    }
+    records.for_each_primary_candidate_probes(
+        vector,
+        probes,
+        &mut || current_worst_top_distance.get(),
+        &mut |index, distance| {
+            nearest.add(NearestCandidate { index, distance });
+            current_worst_top_distance.set(nearest.current_worst_distance());
+        },
+    );
 
-                    if nearest_len < NEAREST_COUNT {
-                        nearest_indexes[nearest_len] = index;
-                        nearest_distances[nearest_len] = distance;
-                        nearest_len += 1;
+    let boundary_case = nearest.is_ambiguous(records);
+    let candidates = nearest.into_sorted_candidates();
 
-                        if distance > nearest_distances[farthest_slot] {
-                            farthest_slot = nearest_len - 1;
-                        }
-
-                        if nearest_len == NEAREST_COUNT {
-                            current_worst_top_distance.set(nearest_distances[farthest_slot]);
-                        }
-                    } else if distance < nearest_distances[farthest_slot] {
-                        nearest_indexes[farthest_slot] = index;
-                        nearest_distances[farthest_slot] = distance;
-                        farthest_slot = farthest_slot_in(&nearest_distances);
-                        current_worst_top_distance.set(nearest_distances[farthest_slot]);
-                    }
-                },
-            );
-        };
-    }
-
-    collect_candidates!(for_each_primary_candidate_probes);
-
-    let boundary_case = is_ambiguous_nearest(&nearest_indexes, nearest_len, records);
-
-    let mut nearest = Vec::with_capacity(nearest_len);
-
-    for slot in 0..nearest_len {
-        nearest.push((nearest_indexes[slot], nearest_distances[slot]));
-    }
-
-    nearest.sort_unstable_by_key(|(_, distance)| *distance);
     NearestResult {
-        candidates: nearest,
+        candidates,
         boundary_case,
     }
-}
-
-fn nearest_contains(
-    nearest_indexes: &[usize; NEAREST_COUNT],
-    nearest_len: usize,
-    index: usize,
-) -> bool {
-    nearest_indexes[..nearest_len].contains(&index)
-}
-
-fn is_ambiguous_nearest(
-    nearest_indexes: &[usize; NEAREST_COUNT],
-    nearest_len: usize,
-    records: &(impl ReferenceSource + ?Sized),
-) -> bool {
-    if nearest_len < NEAREST_COUNT {
-        return true;
-    }
-
-    let frauds = nearest_indexes
-        .iter()
-        .filter(|index| records.is_fraud(**index))
-        .count();
-
-    frauds > 0 && frauds < NEAREST_COUNT
-}
-
-fn farthest_slot_in(distances: &[u64; NEAREST_COUNT]) -> usize {
-    let mut farthest_slot = 0;
-
-    for slot in 1..distances.len() {
-        if distances[slot] > distances[farthest_slot] {
-            farthest_slot = slot;
-        }
-    }
-
-    farthest_slot
 }
 
 #[cfg(test)]
@@ -442,7 +466,7 @@ mod tests {
             nearest(&query, &records, IVF_INITIAL_PROBES)
                 .candidates
                 .iter()
-                .map(|(index, _)| *index)
+                .map(|candidate| candidate.index)
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 4]
         );
@@ -581,7 +605,7 @@ mod tests {
             nearest(&query, &records, IVF_INITIAL_PROBES)
                 .candidates
                 .iter()
-                .map(|(index, _)| *index)
+                .map(|candidate| candidate.index)
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
         );
