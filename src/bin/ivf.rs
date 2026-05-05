@@ -111,7 +111,7 @@ impl IndexIvf {
             );
         }
 
-        if PQ_CODEWORDS > 256 {
+        if PQ_CODEWORDS > u8::MAX as usize + 1 {
             bail!("invalid PQ codewords: {} > 256", PQ_CODEWORDS);
         }
 
@@ -381,12 +381,11 @@ impl IndexIvf {
         let mut codes = vec![0_u8; entry_count * PQ_LAYOUT.0];
 
         for (position, centroid) in by_position.into_iter().enumerate() {
-            let reference_index = position;
             let vector = dataset.vector_at(position);
 
             let cursor = &mut cursors[centroid as usize];
             let entry = *cursor as usize;
-            indices[entry] = reference_index as u32;
+            indices[entry] = position as u32;
             Self::encode_residual(
                 &vector,
                 &centroids[centroid as usize],
