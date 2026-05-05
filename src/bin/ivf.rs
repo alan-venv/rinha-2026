@@ -11,11 +11,11 @@ use memmap2::Mmap;
 
 const REFERENCES_PATH: &str = "resources/references.bin";
 const PRIMARY_IVF_PATH: &str = "resources/ivf.bin";
-const SAMPLE_MULTIPLIER: usize = 64;
-const PQ_SAMPLE_MULTIPLIER: usize = 512;
-const PQ_ITERATIONS: usize = 30;
+const SAMPLE_MULTIPLIER: usize = 16;
+const PQ_SAMPLE_MULTIPLIER: usize = 32;
+const PQ_ITERATIONS: usize = 0;
 
-type PqSubVector = [i16; PQ_DIMENSIONS_PER_SUBQUANTIZER];
+type PqSubVector = [i16; PQ_LAYOUT.1];
 
 fn main() -> Result<()> {
     build_all_indexes()
@@ -34,18 +34,15 @@ pub(crate) fn build_all_indexes() -> Result<()> {
 
 fn validate_shared_config() -> Result<()> {
     validate_non_zero("centroid count", IVF_CENTROIDS)?;
-    validate_non_zero("PQ subquantizers", PQ_SUBQUANTIZERS)?;
+    validate_non_zero("PQ subquantizers", PQ_LAYOUT.0)?;
     validate_non_zero("PQ codewords", PQ_CODEWORDS)?;
-    validate_non_zero(
-        "PQ dimensions per subquantizer",
-        PQ_DIMENSIONS_PER_SUBQUANTIZER,
-    )?;
+    validate_non_zero("PQ dimensions per subquantizer", PQ_LAYOUT.1)?;
 
-    if PQ_SUBQUANTIZERS * PQ_DIMENSIONS_PER_SUBQUANTIZER != VECTOR_DIMENSIONS {
+    if PQ_LAYOUT.0 * PQ_LAYOUT.1 != VECTOR_DIMENSIONS {
         bail!(
             "invalid PQ layout: {}x{} does not cover {} dimensions",
-            PQ_SUBQUANTIZERS,
-            PQ_DIMENSIONS_PER_SUBQUANTIZER,
+            PQ_LAYOUT.0,
+            PQ_LAYOUT.1,
             VECTOR_DIMENSIONS
         );
     }
@@ -112,8 +109,8 @@ fn build_index(
         references.len(),
         centroid_count,
         sample_count,
-        PQ_SUBQUANTIZERS,
-        PQ_DIMENSIONS_PER_SUBQUANTIZER,
+        PQ_LAYOUT.0,
+        PQ_LAYOUT.1,
         PQ_CODEWORDS,
         PQ_ITERATIONS,
         workers,
@@ -157,7 +154,7 @@ fn build_index(
         output.display(),
         IVF_HEADER_LEN
             + centroids.len() * VECTOR_LEN
-            + codebooks.len() * PQ_DIMENSIONS_PER_SUBQUANTIZER * size_of::<i16>()
+            + codebooks.len() * PQ_LAYOUT.1 * size_of::<i16>()
             + assignments.offsets.len() * size_of::<u32>()
             + indices.len() * size_of::<u32>()
             + codes.len()
@@ -369,7 +366,7 @@ fn candidate_indices_and_codes(
     let mut cursors = offsets[..offsets.len() - 1].to_vec();
     let entry_count = references.len();
     let mut indices = vec![0_u32; entry_count];
-    let mut codes = vec![0_u8; entry_count * PQ_CODE_LEN];
+    let mut codes = vec![0_u8; entry_count * PQ_LAYOUT.0];
 
     for (position, centroid) in assignments_by_position.into_iter().enumerate() {
         let reference_index = references.index_at(position);
@@ -382,7 +379,7 @@ fn candidate_indices_and_codes(
             &vector,
             &centroids[centroid as usize],
             codebooks,
-            &mut codes[entry * PQ_CODE_LEN..(entry + 1) * PQ_CODE_LEN],
+            &mut codes[entry * PQ_LAYOUT.0..(entry + 1) * PQ_LAYOUT.0],
         );
         *cursor += 1;
     }
@@ -403,15 +400,14 @@ fn train_pq_codebooks(
         assignments_by_position,
         requested.max(PQ_CODEWORDS),
     );
-    let worker_count = workers.min(PQ_SUBQUANTIZERS).max(1);
-    let subquantizers_per_worker = PQ_SUBQUANTIZERS.div_ceil(worker_count);
+    let worker_count = workers.min(PQ_LAYOUT.0).max(1);
+    let subquantizers_per_worker = PQ_LAYOUT.0.div_ceil(worker_count);
     let codebooks_by_subquantizer = thread::scope(|scope| {
         let mut tasks = Vec::with_capacity(worker_count);
 
-        for subquantizer_start in (0..PQ_SUBQUANTIZERS).step_by(subquantizers_per_worker) {
+        for subquantizer_start in (0..PQ_LAYOUT.0).step_by(subquantizers_per_worker) {
             let samples = &samples;
-            let subquantizer_end =
-                (subquantizer_start + subquantizers_per_worker).min(PQ_SUBQUANTIZERS);
+            let subquantizer_end = (subquantizer_start + subquantizers_per_worker).min(PQ_LAYOUT.0);
 
             tasks.push(scope.spawn(move || {
                 let mut codebooks = Vec::with_capacity(subquantizer_end - subquantizer_start);
@@ -420,7 +416,7 @@ fn train_pq_codebooks(
                     println!(
                         "training PQ subquantizer {}/{} with {} samples",
                         subquantizer + 1,
-                        PQ_SUBQUANTIZERS,
+                        PQ_LAYOUT.0,
                         samples.len()
                     );
                     let mut codebook = initial_pq_codebook(samples, subquantizer);
@@ -436,7 +432,7 @@ fn train_pq_codebooks(
             }));
         }
 
-        let mut codebooks_by_subquantizer = vec![Vec::new(); PQ_SUBQUANTIZERS];
+        let mut codebooks_by_subquantizer = vec![Vec::new(); PQ_LAYOUT.0];
 
         for task in tasks {
             for (subquantizer, codebook) in task.join().expect("worker thread panicked") {
@@ -446,7 +442,7 @@ fn train_pq_codebooks(
 
         codebooks_by_subquantizer
     });
-    let mut codebooks = Vec::with_capacity(PQ_SUBQUANTIZERS * PQ_CODEWORDS);
+    let mut codebooks = Vec::with_capacity(PQ_LAYOUT.0 * PQ_CODEWORDS);
 
     for codebook in codebooks_by_subquantizer {
         codebooks.extend(codebook);
@@ -490,7 +486,7 @@ fn refine_pq_codebook(
     subquantizer: usize,
     codebook: &mut [PqSubVector],
 ) {
-    let mut sums = vec![[0_i64; PQ_DIMENSIONS_PER_SUBQUANTIZER]; PQ_CODEWORDS];
+    let mut sums = vec![[0_i64; PQ_LAYOUT.1]; PQ_CODEWORDS];
     let mut counts = vec![0_u32; PQ_CODEWORDS];
 
     for sample in samples {
@@ -498,7 +494,7 @@ fn refine_pq_codebook(
         let codeword = nearest_codeword(codebook, &value);
         counts[codeword] += 1;
 
-        for dimension in 0..PQ_DIMENSIONS_PER_SUBQUANTIZER {
+        for dimension in 0..PQ_LAYOUT.1 {
             sums[codeword][dimension] += i64::from(value[dimension]);
         }
     }
@@ -510,7 +506,7 @@ fn refine_pq_codebook(
             continue;
         }
 
-        for dimension in 0..PQ_DIMENSIONS_PER_SUBQUANTIZER {
+        for dimension in 0..PQ_LAYOUT.1 {
             codebook[codeword][dimension] = (sums[codeword][dimension] / i64::from(count)) as i16;
         }
     }
@@ -542,10 +538,10 @@ fn residual_vector(vector: &ReferenceVector, centroid: &ReferenceVector) -> Refe
 }
 
 fn subvector(vector: &ReferenceVector, subquantizer: usize) -> PqSubVector {
-    let mut output = [0; PQ_DIMENSIONS_PER_SUBQUANTIZER];
-    let start = subquantizer * PQ_DIMENSIONS_PER_SUBQUANTIZER;
+    let mut output = [0; PQ_LAYOUT.1];
+    let start = subquantizer * PQ_LAYOUT.1;
 
-    output.copy_from_slice(&vector[start..start + PQ_DIMENSIONS_PER_SUBQUANTIZER]);
+    output.copy_from_slice(&vector[start..start + PQ_LAYOUT.1]);
     output
 }
 
@@ -627,9 +623,9 @@ fn write_index(
     writer.write_all(&(reference_count as u64).to_le_bytes())?;
     writer.write_all(&(centroids.len() as u32).to_le_bytes())?;
     writer.write_all(&(indices.len() as u64).to_le_bytes())?;
-    writer.write_all(&(PQ_SUBQUANTIZERS as u32).to_le_bytes())?;
+    writer.write_all(&(PQ_LAYOUT.0 as u32).to_le_bytes())?;
     writer.write_all(&(PQ_CODEWORDS as u32).to_le_bytes())?;
-    writer.write_all(&(PQ_DIMENSIONS_PER_SUBQUANTIZER as u32).to_le_bytes())?;
+    writer.write_all(&(PQ_LAYOUT.1 as u32).to_le_bytes())?;
 
     for centroid in centroids {
         for value in centroid {

@@ -8,7 +8,6 @@ use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 
 const IVF_PATH: &str = "resources/ivf.bin";
-const REFERENCES_PATH: &str = "resources/references.bin";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReferenceRecord {
@@ -19,27 +18,24 @@ pub struct ReferenceRecord {
 pub trait ReferenceSource {
     fn is_fraud(&self, index: usize) -> bool;
 
-    fn exact_vector(&self, index: usize) -> Option<ReferenceVector>;
-
-    fn for_each_primary_candidate_probes(
+    fn for_each_primary_candidates<C, V>(
         &self,
         vector: &ReferenceVector,
-        probes: usize,
-        current_worst_top_distance: &mut dyn FnMut() -> u64,
-        visit: &mut dyn FnMut(usize, u64),
-    );
+        current_worst_top_distance: &mut C,
+        visit: &mut V,
+    ) where
+        C: FnMut() -> u64,
+        V: FnMut(usize, u64);
 }
 
 pub struct IndexedReferences {
     ivfs: IvfIndexes,
-    exact: ExactReferences,
 }
 
 pub fn load_references() -> Result<IndexedReferences> {
     let ivfs = IvfIndexes::load()?;
-    let exact = ExactReferences::load("REFERENCES_PATH", REFERENCES_PATH, ivfs.reference_count())?;
 
-    Ok(IndexedReferences { ivfs, exact })
+    Ok(IndexedReferences { ivfs })
 }
 
 fn read_u32_at(bytes: &[u8], offset: usize) -> u32 {
@@ -49,9 +45,8 @@ fn read_u32_at(bytes: &[u8], offset: usize) -> u32 {
 }
 
 fn read_i16_at(bytes: &[u8], offset: usize) -> i16 {
-    let mut value = [0; size_of::<i16>()];
-    value.copy_from_slice(&bytes[offset..offset + size_of::<i16>()]);
-    i16::from_le_bytes(value)
+    debug_assert!(offset + size_of::<i16>() <= bytes.len());
+    unsafe { i16::from_le(std::ptr::read_unaligned(bytes.as_ptr().add(offset).cast())) }
 }
 
 fn read_u64_at(bytes: &[u8], offset: usize) -> u64 {
@@ -65,23 +60,17 @@ impl ReferenceSource for IndexedReferences {
         self.ivfs.is_fraud(index)
     }
 
-    fn exact_vector(&self, index: usize) -> Option<ReferenceVector> {
-        Some(self.exact.vector_at(index))
-    }
-
-    fn for_each_primary_candidate_probes(
+    fn for_each_primary_candidates<C, V>(
         &self,
         vector: &ReferenceVector,
-        probes: usize,
-        current_worst_top_distance: &mut dyn FnMut() -> u64,
-        visit: &mut dyn FnMut(usize, u64),
-    ) {
-        self.ivfs.for_each_primary_candidate_probes(
-            vector,
-            probes,
-            current_worst_top_distance,
-            visit,
-        );
+        current_worst_top_distance: &mut C,
+        visit: &mut V,
+    ) where
+        C: FnMut() -> u64,
+        V: FnMut(usize, u64),
+    {
+        self.ivfs
+            .for_each_primary_candidates(vector, current_worst_top_distance, visit);
     }
 }
 
@@ -90,18 +79,15 @@ impl ReferenceSource for [ReferenceRecord] {
         self[index].is_fraud
     }
 
-    fn exact_vector(&self, index: usize) -> Option<ReferenceVector> {
-        Some(self[index].vector)
-    }
-
-    fn for_each_primary_candidate_probes(
+    fn for_each_primary_candidates<C, V>(
         &self,
         vector: &ReferenceVector,
-        probes: usize,
-        current_worst_top_distance: &mut dyn FnMut() -> u64,
-        visit: &mut dyn FnMut(usize, u64),
-    ) {
-        let _ = probes;
+        current_worst_top_distance: &mut C,
+        visit: &mut V,
+    ) where
+        C: FnMut() -> u64,
+        V: FnMut(usize, u64),
+    {
         for index in 0..self.len() {
             let max_useful_distance = current_worst_top_distance();
             let distance = distance2_limited(vector, &self[index].vector, max_useful_distance);
@@ -118,23 +104,17 @@ impl<const N: usize> ReferenceSource for [ReferenceRecord; N] {
         self[index].is_fraud
     }
 
-    fn exact_vector(&self, index: usize) -> Option<ReferenceVector> {
-        self.as_slice().exact_vector(index)
-    }
-
-    fn for_each_primary_candidate_probes(
+    fn for_each_primary_candidates<C, V>(
         &self,
         vector: &ReferenceVector,
-        probes: usize,
-        current_worst_top_distance: &mut dyn FnMut() -> u64,
-        visit: &mut dyn FnMut(usize, u64),
-    ) {
-        self.as_slice().for_each_primary_candidate_probes(
-            vector,
-            probes,
-            current_worst_top_distance,
-            visit,
-        );
+        current_worst_top_distance: &mut C,
+        visit: &mut V,
+    ) where
+        C: FnMut() -> u64,
+        V: FnMut(usize, u64),
+    {
+        self.as_slice()
+            .for_each_primary_candidates(vector, current_worst_top_distance, visit);
     }
 }
 
@@ -201,76 +181,17 @@ impl IvfIndexes {
         self.primary.is_fraud(index)
     }
 
-    fn reference_count(&self) -> usize {
-        self.primary.reference_count
-    }
-
-    fn for_each_primary_candidate_probes(
+    fn for_each_primary_candidates<C, V>(
         &self,
         vector: &ReferenceVector,
-        probes: usize,
-        current_worst_top_distance: &mut dyn FnMut() -> u64,
-        visit: &mut dyn FnMut(usize, u64),
-    ) {
+        current_worst_top_distance: &mut C,
+        visit: &mut V,
+    ) where
+        C: FnMut() -> u64,
+        V: FnMut(usize, u64),
+    {
         self.primary
-            .for_each_candidate_probes(vector, probes, current_worst_top_distance, visit);
-    }
-}
-
-struct ExactReferences {
-    mmap: Mmap,
-    count: usize,
-}
-
-impl ExactReferences {
-    fn load(env_key: &str, default_path: &str, expected_count: usize) -> Result<Self> {
-        let path = env::var(env_key).unwrap_or_else(|_| default_path.to_string());
-        let input_file = File::open(Path::new(&path))
-            .with_context(|| format!("failed to open required references at {path}"))?;
-        let mmap = unsafe { Mmap::map(&input_file) }?;
-
-        if mmap.len() < REFERENCE_HEADER_LEN {
-            bail!("invalid references binary: file is smaller than header");
-        }
-
-        if &mmap[..REFERENCE_MAGIC.len()] != REFERENCE_MAGIC {
-            bail!("invalid references binary: bad magic");
-        }
-
-        let count = read_u64_at(&mmap, REFERENCE_MAGIC.len()) as usize;
-
-        if count != expected_count {
-            bail!(
-                "invalid references binary: expected {} references, got {}",
-                expected_count,
-                count
-            );
-        }
-
-        let expected_len = REFERENCE_HEADER_LEN + count * VECTOR_LEN + count.div_ceil(8);
-
-        if mmap.len() != expected_len {
-            bail!(
-                "invalid references binary: expected {} bytes, got {} bytes",
-                expected_len,
-                mmap.len()
-            );
-        }
-
-        Ok(Self { mmap, count })
-    }
-
-    fn vector_at(&self, index: usize) -> ReferenceVector {
-        debug_assert!(index < self.count);
-        let offset = REFERENCE_HEADER_LEN + index * VECTOR_LEN;
-        let reference = unsafe { self.mmap.as_ptr().add(offset).cast::<i16>() };
-        let mut vector = [0; VECTOR_DIMENSIONS];
-
-        for (dimension, value) in vector.iter_mut().enumerate() {
-            *value = i16::from_le(unsafe { *reference.add(dimension) });
-        }
-
-        vector
+            .for_each_candidates(vector, current_worst_top_distance, visit);
     }
 }
 
@@ -309,47 +230,58 @@ impl IvfIndex {
         byte & (1 << (index % 8)) != 0
     }
 
-    fn for_each_candidate_probes(
+    fn for_each_candidates<C, V>(
         &self,
         vector: &ReferenceVector,
-        probes: usize,
-        current_worst_top_distance: &mut dyn FnMut() -> u64,
-        visit: &mut dyn FnMut(usize, u64),
-    ) {
-        let nearest_centroids = self.nearest_centroids(vector, probes);
+        current_worst_top_distance: &mut C,
+        visit: &mut V,
+    ) where
+        C: FnMut() -> u64,
+        V: FnMut(usize, u64),
+    {
+        let centroid = self.nearest_centroid_index(vector);
+        self.for_each_candidate_in_centroid(centroid, vector, current_worst_top_distance, visit);
+    }
 
-        for centroid in nearest_centroids.indexes() {
-            let start = self.candidate_list_boundary_at(centroid) as usize;
-            let end = self.candidate_list_boundary_at(centroid + 1) as usize;
-            let distance_table = self.pq_distance_table(centroid, vector);
+    fn for_each_candidate_in_centroid<C, V>(
+        &self,
+        centroid: usize,
+        vector: &ReferenceVector,
+        current_worst_top_distance: &mut C,
+        visit: &mut V,
+    ) where
+        C: FnMut() -> u64,
+        V: FnMut(usize, u64),
+    {
+        let start = self.candidate_list_boundary_at(centroid) as usize;
+        let end = self.candidate_list_boundary_at(centroid + 1) as usize;
+        let distance_table = self.pq_distance_table(centroid, vector);
 
-            for position in start..end {
+        for position in start..end {
+            let max_useful_distance = current_worst_top_distance();
+            let distance = self.candidate_pq_distance(position, &distance_table);
+
+            if is_candidate_distance_useful(distance, max_useful_distance) {
                 let index = self.candidate_index_at(position) as usize;
-                let max_useful_distance = current_worst_top_distance();
-                let distance = self.candidate_pq_distance(position, &distance_table);
-
-                if is_candidate_distance_useful(distance, max_useful_distance) {
-                    visit(index, distance);
-                }
+                visit(index, distance);
             }
         }
     }
 
-    fn nearest_centroids(&self, vector: &ReferenceVector, max_probes: usize) -> NearestCentroids {
-        let capacity = max_probes.min(self.centroid_count);
-        let mut nearest = NearestCentroids::new(capacity);
-
-        if nearest.is_empty() {
-            return nearest;
-        }
+    fn nearest_centroid_index(&self, vector: &ReferenceVector) -> usize {
+        let mut nearest_index = 0;
+        let mut nearest_distance = u64::MAX;
 
         for centroid in 0..self.centroid_count {
             let distance = self.centroid_distance2_at(centroid, vector);
-            nearest.try_insert(centroid, distance);
+
+            if distance < nearest_distance {
+                nearest_index = centroid;
+                nearest_distance = distance;
+            }
         }
 
-        nearest.sort();
-        nearest
+        nearest_index
     }
 
     fn centroid_distance2_at(&self, centroid: usize, vector: &ReferenceVector) -> u64 {
@@ -373,10 +305,10 @@ impl IvfIndex {
         &self,
         centroid: usize,
         vector: &ReferenceVector,
-    ) -> [[u64; PQ_CODEWORDS]; PQ_SUBQUANTIZERS] {
-        let mut table = [[0_u64; PQ_CODEWORDS]; PQ_SUBQUANTIZERS];
+    ) -> [[u64; PQ_CODEWORDS]; PQ_LAYOUT.0] {
+        let mut table = [[0_u64; PQ_CODEWORDS]; PQ_LAYOUT.0];
 
-        for subquantizer in 0..PQ_SUBQUANTIZERS {
+        for subquantizer in 0..PQ_LAYOUT.0 {
             for codeword in 0..PQ_CODEWORDS {
                 table[subquantizer][codeword] = self.query_residual_codeword_distance2(
                     centroid,
@@ -398,11 +330,11 @@ impl IvfIndex {
         codeword: usize,
     ) -> u64 {
         let mut distance = 0;
-        let dimension_start = subquantizer * PQ_DIMENSIONS_PER_SUBQUANTIZER;
+        let dimension_start = subquantizer * PQ_LAYOUT.1;
         let centroid_offset = self.centroid_vector_offset(centroid);
         let codeword_offset = self.codeword_offset(subquantizer, codeword);
 
-        for dimension in 0..PQ_DIMENSIONS_PER_SUBQUANTIZER {
+        for dimension in 0..PQ_LAYOUT.1 {
             let query = vector[dimension_start + dimension];
             let centroid_value = read_i16_at(
                 &self.mmap,
@@ -421,12 +353,12 @@ impl IvfIndex {
     fn candidate_pq_distance(
         &self,
         position: usize,
-        distance_table: &[[u64; PQ_CODEWORDS]; PQ_SUBQUANTIZERS],
+        distance_table: &[[u64; PQ_CODEWORDS]; PQ_LAYOUT.0],
     ) -> u64 {
         let mut distance = 0;
         let code_offset = self.candidate_code_offset(position);
 
-        for subquantizer in 0..PQ_SUBQUANTIZERS {
+        for subquantizer in 0..PQ_LAYOUT.0 {
             let codeword = self.mmap[code_offset + subquantizer] as usize;
             distance += distance_table[subquantizer][codeword];
         }
@@ -440,9 +372,7 @@ impl IvfIndex {
 
     fn codeword_offset(&self, subquantizer: usize, codeword: usize) -> usize {
         self.codebooks_offset
-            + (subquantizer * PQ_CODEWORDS + codeword)
-                * PQ_DIMENSIONS_PER_SUBQUANTIZER
-                * size_of::<i16>()
+            + (subquantizer * PQ_CODEWORDS + codeword) * PQ_LAYOUT.1 * size_of::<i16>()
     }
 
     fn candidate_list_boundary_offset(&self, centroid: usize) -> usize {
@@ -454,7 +384,7 @@ impl IvfIndex {
     }
 
     fn candidate_code_offset(&self, position: usize) -> usize {
-        self.codes_offset + position * PQ_CODE_LEN
+        self.codes_offset + position * PQ_LAYOUT.0
     }
 }
 
@@ -512,15 +442,15 @@ impl IvfLayout {
         let pq_dimensions_offset = pq_codewords_offset + size_of::<u32>();
         let pq_dimensions = read_u32_at(bytes, pq_dimensions_offset) as usize;
 
-        if pq_subquantizers != PQ_SUBQUANTIZERS
+        if pq_subquantizers != PQ_LAYOUT.0
             || pq_codewords != PQ_CODEWORDS
-            || pq_dimensions != PQ_DIMENSIONS_PER_SUBQUANTIZER
+            || pq_dimensions != PQ_LAYOUT.1
         {
             bail!(
                 "invalid IVF binary: expected PQ {}x{}x{}, got {}x{}x{}",
-                PQ_SUBQUANTIZERS,
+                PQ_LAYOUT.0,
                 PQ_CODEWORDS,
-                PQ_DIMENSIONS_PER_SUBQUANTIZER,
+                PQ_LAYOUT.1,
                 pq_subquantizers,
                 pq_codewords,
                 pq_dimensions
@@ -529,11 +459,11 @@ impl IvfLayout {
 
         let centroids_offset = IVF_HEADER_LEN;
         let codebooks_offset = centroids_offset + centroid_count * VECTOR_LEN;
-        let offsets_offset = codebooks_offset
-            + PQ_SUBQUANTIZERS * PQ_CODEWORDS * PQ_DIMENSIONS_PER_SUBQUANTIZER * size_of::<i16>();
+        let offsets_offset =
+            codebooks_offset + PQ_LAYOUT.0 * PQ_CODEWORDS * PQ_LAYOUT.1 * size_of::<i16>();
         let indices_offset = offsets_offset + (centroid_count + 1) * size_of::<u32>();
         let codes_offset = indices_offset + index_count * size_of::<u32>();
-        let fraud_offset = codes_offset + index_count * PQ_CODE_LEN;
+        let fraud_offset = codes_offset + index_count * PQ_LAYOUT.0;
         let expected_len = fraud_offset
             + if require_fraud_labels {
                 count.div_ceil(8)
@@ -573,83 +503,6 @@ impl IvfLayout {
     }
 }
 
-struct NearestCentroids {
-    indexes: Vec<usize>,
-    distances: Vec<u64>,
-    capacity: usize,
-    filled: usize,
-    farthest_slot: usize,
-}
-
-impl NearestCentroids {
-    fn new(capacity: usize) -> Self {
-        Self {
-            indexes: vec![0; capacity],
-            distances: vec![u64::MAX; capacity],
-            capacity,
-            filled: 0,
-            farthest_slot: 0,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.capacity == 0
-    }
-
-    fn indexes(&self) -> impl Iterator<Item = usize> + '_ {
-        self.indexes[..self.filled].iter().copied()
-    }
-
-    fn try_insert(&mut self, index: usize, distance: u64) {
-        if self.filled < self.capacity {
-            self.insert_at(self.filled, index, distance);
-
-            if distance > self.distances[self.farthest_slot] {
-                self.farthest_slot = self.filled;
-            }
-
-            self.filled += 1;
-        } else if distance < self.distances[self.farthest_slot] {
-            self.insert_at(self.farthest_slot, index, distance);
-            self.farthest_slot = farthest_slot_in_slice(&self.distances[..self.capacity]);
-        }
-    }
-
-    fn insert_at(&mut self, slot: usize, index: usize, distance: u64) {
-        self.indexes[slot] = index;
-        self.distances[slot] = distance;
-    }
-
-    fn sort(&mut self) {
-        for slot in 1..self.filled {
-            let index = self.indexes[slot];
-            let distance = self.distances[slot];
-            let mut cursor = slot;
-
-            while cursor > 0 && distance < self.distances[cursor - 1] {
-                self.indexes[cursor] = self.indexes[cursor - 1];
-                self.distances[cursor] = self.distances[cursor - 1];
-                cursor -= 1;
-            }
-
-            self.indexes[cursor] = index;
-            self.distances[cursor] = distance;
-        }
-    }
-}
-
-fn farthest_slot_in_slice(distances: &[u64]) -> usize {
-    let mut farthest_slot = 0;
-
-    for slot in 1..distances.len() {
-        if distances[slot] > distances[farthest_slot] {
-            farthest_slot = slot;
-        }
-    }
-
-    farthest_slot
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,15 +519,15 @@ mod tests {
         bytes.extend_from_slice(&(reference_count as u64).to_le_bytes());
         bytes.extend_from_slice(&(centroid_count as u32).to_le_bytes());
         bytes.extend_from_slice(&(entry_count as u64).to_le_bytes());
-        bytes.extend_from_slice(&(PQ_SUBQUANTIZERS as u32).to_le_bytes());
+        bytes.extend_from_slice(&(PQ_LAYOUT.0 as u32).to_le_bytes());
         bytes.extend_from_slice(&(PQ_CODEWORDS as u32).to_le_bytes());
-        bytes.extend_from_slice(&(PQ_DIMENSIONS_PER_SUBQUANTIZER as u32).to_le_bytes());
+        bytes.extend_from_slice(&(PQ_LAYOUT.1 as u32).to_le_bytes());
 
         for _ in 0..centroid_count * VECTOR_DIMENSIONS {
             bytes.extend_from_slice(&0_i16.to_le_bytes());
         }
 
-        for _ in 0..PQ_SUBQUANTIZERS * PQ_CODEWORDS * PQ_DIMENSIONS_PER_SUBQUANTIZER {
+        for _ in 0..PQ_LAYOUT.0 * PQ_CODEWORDS * PQ_LAYOUT.1 {
             bytes.extend_from_slice(&0_i16.to_le_bytes());
         }
 
@@ -683,11 +536,17 @@ mod tests {
             bytes.extend_from_slice(&(boundary as u32).to_le_bytes());
         }
 
-        for index in [2_u32, 0, 1].into_iter().take(entry_count) {
+        for position in 0..entry_count {
+            let index = match position {
+                0 => 2,
+                1 => 0,
+                2 => 1,
+                _ => position as u32,
+            };
             bytes.extend_from_slice(&index.to_le_bytes());
         }
 
-        bytes.resize(bytes.len() + entry_count * PQ_CODE_LEN, 0);
+        bytes.resize(bytes.len() + entry_count * PQ_LAYOUT.0, 0);
         bytes
     }
 
@@ -769,7 +628,7 @@ mod tests {
         let mut bytes = sample_ivf_bytes(3, 1, 3);
         let offsets_offset = IVF_HEADER_LEN
             + VECTOR_LEN
-            + PQ_SUBQUANTIZERS * PQ_CODEWORDS * PQ_DIMENSIONS_PER_SUBQUANTIZER * size_of::<i16>();
+            + PQ_LAYOUT.0 * PQ_CODEWORDS * PQ_LAYOUT.1 * size_of::<i16>();
         bytes[offsets_offset + size_of::<u32>()..offsets_offset + 2 * size_of::<u32>()]
             .copy_from_slice(&2_u32.to_le_bytes());
 
@@ -798,41 +657,12 @@ mod tests {
         };
         let mut visited = Vec::new();
 
-        index.for_each_candidate_probes(
+        index.for_each_candidates(
             &[0; VECTOR_DIMENSIONS],
-            1,
             &mut || u64::MAX,
             &mut |index, distance| visited.push((index, distance)),
         );
 
         assert_eq!(visited, vec![(2, 0), (0, 0), (1, 0)]);
-    }
-
-    #[test]
-    fn visits_candidates_from_multiple_requested_probes() {
-        let bytes = sample_ivf_bytes(3, 2, 2);
-        let mmap = mmap_bytes(&bytes);
-        let layout = IvfLayout::read(&mmap, Some(3), false).unwrap();
-        let index = IvfIndex {
-            mmap,
-            reference_count: layout.reference_count,
-            centroid_count: layout.centroid_count,
-            centroids_offset: layout.centroids_offset,
-            codebooks_offset: layout.codebooks_offset,
-            offsets_offset: layout.offsets_offset,
-            indices_offset: layout.indices_offset,
-            codes_offset: layout.codes_offset,
-            fraud_offset: layout.fraud_offset,
-        };
-        let mut visited = Vec::new();
-
-        index.for_each_candidate_probes(
-            &[0; VECTOR_DIMENSIONS],
-            2,
-            &mut || u64::MAX,
-            &mut |index, distance| visited.push((index, distance)),
-        );
-
-        assert_eq!(visited, vec![(2, 0), (0, 0)]);
     }
 }
