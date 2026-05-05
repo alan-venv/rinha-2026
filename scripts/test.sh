@@ -8,4 +8,4 @@ k6 run scripts/k6/main.js
 docker compose -f docker/docker-compose.yml down
 
 clear
-cat scripts/k6/results.json | grep -e "ms" -e "value" -e "false_" -e "final" | tr -d '[:blank:]'
+cat scripts/k6/results.json | grep -e "ms" -e "false_" -e "final" | tr -d '[:blank:]'

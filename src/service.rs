@@ -11,9 +11,11 @@ const NEAREST_COUNT: usize = 5;
 
 pub struct FraudScoreDetails {
     pub score: f32,
+    #[allow(dead_code)]
     pub boundary_case: bool,
 }
 
+#[allow(dead_code)]
 pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> f32 {
     fraud_score_details(vector, records).score
 }
