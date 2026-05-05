@@ -39,10 +39,7 @@ pub fn load_references() -> Result<IndexedReferences> {
     let ivfs = IvfIndexes::load()?;
     let exact = ExactReferences::load("REFERENCES_PATH", REFERENCES_PATH, ivfs.reference_count())?;
 
-    Ok(IndexedReferences {
-        ivfs,
-        exact,
-    })
+    Ok(IndexedReferences { ivfs, exact })
 }
 
 fn read_u32_at(bytes: &[u8], offset: usize) -> u32 {
@@ -339,7 +336,7 @@ impl IvfIndex {
     }
 
     fn nearest_centroids(&self, vector: &ReferenceVector, max_probes: usize) -> NearestCentroids {
-        let capacity = max_probes.min(self.centroid_count).min(IVF_INITIAL_PROBES);
+        let capacity = max_probes.min(self.centroid_count);
         let mut nearest = NearestCentroids::new(capacity);
 
         if nearest.is_empty() {
@@ -577,8 +574,8 @@ impl IvfLayout {
 }
 
 struct NearestCentroids {
-    indexes: [usize; IVF_INITIAL_PROBES],
-    distances: [u64; IVF_INITIAL_PROBES],
+    indexes: Vec<usize>,
+    distances: Vec<u64>,
     capacity: usize,
     filled: usize,
     farthest_slot: usize,
@@ -587,8 +584,8 @@ struct NearestCentroids {
 impl NearestCentroids {
     fn new(capacity: usize) -> Self {
         Self {
-            indexes: [0; IVF_INITIAL_PROBES],
-            distances: [u64::MAX; IVF_INITIAL_PROBES],
+            indexes: vec![0; capacity],
+            distances: vec![u64::MAX; capacity],
             capacity,
             filled: 0,
             farthest_slot: 0,
@@ -681,8 +678,10 @@ mod tests {
             bytes.extend_from_slice(&0_i16.to_le_bytes());
         }
 
-        bytes.extend_from_slice(&0_u32.to_le_bytes());
-        bytes.extend_from_slice(&(entry_count as u32).to_le_bytes());
+        for offset in 0..=centroid_count {
+            let boundary = offset * entry_count / centroid_count;
+            bytes.extend_from_slice(&(boundary as u32).to_le_bytes());
+        }
 
         for index in [2_u32, 0, 1].into_iter().take(entry_count) {
             bytes.extend_from_slice(&index.to_le_bytes());
@@ -807,5 +806,33 @@ mod tests {
         );
 
         assert_eq!(visited, vec![(2, 0), (0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn visits_candidates_from_multiple_requested_probes() {
+        let bytes = sample_ivf_bytes(3, 2, 2);
+        let mmap = mmap_bytes(&bytes);
+        let layout = IvfLayout::read(&mmap, Some(3), false).unwrap();
+        let index = IvfIndex {
+            mmap,
+            reference_count: layout.reference_count,
+            centroid_count: layout.centroid_count,
+            centroids_offset: layout.centroids_offset,
+            codebooks_offset: layout.codebooks_offset,
+            offsets_offset: layout.offsets_offset,
+            indices_offset: layout.indices_offset,
+            codes_offset: layout.codes_offset,
+            fraud_offset: layout.fraud_offset,
+        };
+        let mut visited = Vec::new();
+
+        index.for_each_candidate_probes(
+            &[0; VECTOR_DIMENSIONS],
+            2,
+            &mut || u64::MAX,
+            &mut |index, distance| visited.push((index, distance)),
+        );
+
+        assert_eq!(visited, vec![(2, 0), (0, 0)]);
     }
 }

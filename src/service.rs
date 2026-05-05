@@ -8,6 +8,7 @@ use crate::memory::ReferenceSource;
 use rinha::*;
 
 const NEAREST_COUNT: usize = 5;
+const BOUNDARY_VALIDATION_PROBES: [usize; 3] = [1, 2, 4];
 const BOUNDARY_LOOKAHEAD_COUNT: usize = 20;
 const BOUNDARY_DISTANCE_RATIO_NUMERATOR: u64 = 150;
 const BOUNDARY_DISTANCE_RATIO_DENOMINATOR: u64 = 100;
@@ -27,20 +28,48 @@ pub fn fraud_score_details(
     vector: &ReferenceVector,
     records: &(impl ReferenceSource + ?Sized),
 ) -> FraudScoreDetails {
-    let nearest = nearest(vector, records, IVF_INITIAL_PROBES);
-    let exact_candidates = if nearest.boundary_case {
-        exact_rerank(vector, &nearest.candidates, records)
-    } else {
-        None
-    };
-    let candidates = exact_candidates.as_deref().unwrap_or(&nearest.candidates);
+    let mut nearest_result = nearest(vector, records, IVF_INITIAL_PROBES);
+
+    if !nearest_result.boundary_case {
+        return FraudScoreDetails {
+            score: score_from_candidates(&nearest_result.candidates, records),
+            boundary_case: false,
+        };
+    }
+
+    let mut score = score_from_candidates(&nearest_result.candidates, records);
+
+    for (attempt, probes) in BOUNDARY_VALIDATION_PROBES.iter().copied().enumerate() {
+        if attempt > 0 {
+            nearest_result = nearest(vector, records, probes);
+        }
+
+        let exact_candidates = exact_rerank(vector, &nearest_result.candidates, records);
+        score = score_from_candidates(&exact_candidates, records);
+
+        if is_pure_score(score) {
+            break;
+        }
+    }
+
+    FraudScoreDetails {
+        score,
+        boundary_case: true,
+    }
+}
+
+fn score_from_candidates(
+    candidates: &[NearestCandidate],
+    records: &(impl ReferenceSource + ?Sized),
+) -> f32 {
     let score_candidates = &candidates[..candidates.len().min(NEAREST_COUNT)];
     let frauds = fraud_count(score_candidates, records);
 
-    FraudScoreDetails {
-        score: frauds as f32 / score_candidates.len() as f32,
-        boundary_case: nearest.boundary_case,
-    }
+    frauds as f32 / score_candidates.len() as f32
+}
+
+fn is_pure_score(score: f32) -> bool {
+    score == 0.0 || score == 1.0
 }
 
 fn fraud_count(nearest: &[NearestCandidate], records: &(impl ReferenceSource + ?Sized)) -> usize {
@@ -54,11 +83,13 @@ fn exact_rerank(
     vector: &ReferenceVector,
     candidates: &[NearestCandidate],
     records: &(impl ReferenceSource + ?Sized),
-) -> Option<Vec<NearestCandidate>> {
+) -> Vec<NearestCandidate> {
     let mut reranked = Vec::with_capacity(candidates.len());
 
     for candidate in candidates {
-        let reference = records.exact_vector(candidate.index)?;
+        let reference = records
+            .exact_vector(candidate.index)
+            .expect("exact reference vector required for boundary rerank");
         reranked.push(NearestCandidate {
             index: candidate.index,
             distance: exact_distance2(vector, &reference),
@@ -66,7 +97,7 @@ fn exact_rerank(
     }
 
     reranked.sort_unstable_by_key(|candidate| candidate.distance);
-    Some(reranked)
+    reranked
 }
 
 fn exact_distance2(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
@@ -213,12 +244,10 @@ fn is_boundary_case(
     let pure_label = frauds == NEAREST_COUNT;
     let boundary_distance = top[NEAREST_COUNT - 1].distance;
 
-    candidates[NEAREST_COUNT..]
-        .iter()
-        .any(|candidate| {
-            records.is_fraud(candidate.index) != pure_label
-                && is_within_boundary_margin(candidate.distance, boundary_distance)
-        })
+    candidates[NEAREST_COUNT..].iter().any(|candidate| {
+        records.is_fraud(candidate.index) != pure_label
+            && is_within_boundary_margin(candidate.distance, boundary_distance)
+    })
 }
 
 fn is_within_boundary_margin(distance: u64, boundary_distance: u64) -> bool {
@@ -313,6 +342,7 @@ mod tests {
     use super::*;
     use crate::memory::{ReferenceRecord, ReferenceSource};
     use chrono::{DateTime, TimeZone, Utc};
+    use std::cell::RefCell;
 
     fn utc(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(year, month, day, hour, min, sec)
@@ -360,8 +390,8 @@ mod tests {
             self.frauds[index]
         }
 
-        fn exact_vector(&self, _index: usize) -> Option<ReferenceVector> {
-            None
+        fn exact_vector(&self, index: usize) -> Option<ReferenceVector> {
+            Some(vector_at_distance(index as i16))
         }
 
         fn for_each_primary_candidate_probes(
@@ -377,6 +407,70 @@ mod tests {
                 visit(*index, *distance);
             }
         }
+    }
+
+    struct ProgressiveRecords {
+        frauds: Vec<bool>,
+        vectors: Vec<ReferenceVector>,
+        probe_candidates: Vec<(usize, Vec<(usize, u64)>)>,
+        probes_seen: RefCell<Vec<usize>>,
+    }
+
+    impl ProgressiveRecords {
+        fn new(
+            frauds: Vec<bool>,
+            vectors: Vec<ReferenceVector>,
+            probe_candidates: Vec<(usize, Vec<(usize, u64)>)>,
+        ) -> Self {
+            Self {
+                frauds,
+                vectors,
+                probe_candidates,
+                probes_seen: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn probes_seen(&self) -> Vec<usize> {
+            self.probes_seen.borrow().clone()
+        }
+
+        fn candidates_for(&self, probes: usize) -> &[(usize, u64)] {
+            self.probe_candidates
+                .iter()
+                .find(|(candidate_probes, _)| *candidate_probes == probes)
+                .map(|(_, candidates)| candidates.as_slice())
+                .unwrap()
+        }
+    }
+
+    impl ReferenceSource for ProgressiveRecords {
+        fn is_fraud(&self, index: usize) -> bool {
+            self.frauds[index]
+        }
+
+        fn exact_vector(&self, index: usize) -> Option<ReferenceVector> {
+            Some(self.vectors[index])
+        }
+
+        fn for_each_primary_candidate_probes(
+            &self,
+            _vector: &ReferenceVector,
+            probes: usize,
+            _current_worst_top_distance: &mut dyn FnMut() -> u64,
+            visit: &mut dyn FnMut(usize, u64),
+        ) {
+            self.probes_seen.borrow_mut().push(probes);
+
+            for (index, distance) in self.candidates_for(probes) {
+                visit(*index, *distance);
+            }
+        }
+    }
+
+    fn vector_at_distance(distance: i16) -> ReferenceVector {
+        let mut vector = [0; VECTOR_DIMENSIONS];
+        vector[0] = distance;
+        vector
     }
 
     #[test]
@@ -660,6 +754,101 @@ mod tests {
         let details = fraud_score_details(&query, &records);
 
         assert!(details.boundary_case);
+    }
+
+    #[test]
+    fn does_not_escalate_probes_when_exact_boundary_score_is_pure() {
+        let query = [0; VECTOR_DIMENSIONS];
+        let records = ProgressiveRecords::new(
+            vec![true, false, false, false, false, false],
+            vec![
+                vector_at_distance(100),
+                vector_at_distance(0),
+                vector_at_distance(1),
+                vector_at_distance(2),
+                vector_at_distance(3),
+                vector_at_distance(4),
+            ],
+            vec![(1, vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5)])],
+        );
+
+        let details = fraud_score_details(&query, &records);
+
+        assert_eq!(details.score, 0.0);
+        assert!(details.boundary_case);
+        assert_eq!(records.probes_seen(), vec![1]);
+    }
+
+    #[test]
+    fn escalates_to_two_probes_when_exact_boundary_score_stays_mixed() {
+        let query = [0; VECTOR_DIMENSIONS];
+        let records = ProgressiveRecords::new(
+            vec![
+                true, false, false, false, false, true, false, false, false, false, false,
+            ],
+            vec![
+                vector_at_distance(0),
+                vector_at_distance(1),
+                vector_at_distance(2),
+                vector_at_distance(3),
+                vector_at_distance(4),
+                vector_at_distance(5),
+                vector_at_distance(0),
+                vector_at_distance(1),
+                vector_at_distance(2),
+                vector_at_distance(3),
+                vector_at_distance(4),
+            ],
+            vec![
+                (1, vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]),
+                (2, vec![(6, 0), (7, 1), (8, 2), (9, 3), (10, 4)]),
+            ],
+        );
+
+        let details = fraud_score_details(&query, &records);
+
+        assert_eq!(details.score, 0.0);
+        assert!(details.boundary_case);
+        assert_eq!(records.probes_seen(), vec![1, 2]);
+    }
+
+    #[test]
+    fn stops_at_four_probes_and_uses_last_exact_score() {
+        let query = [0; VECTOR_DIMENSIONS];
+        let records = ProgressiveRecords::new(
+            vec![
+                true, true, false, false, false, true, false, false, false, false, true, true,
+                true, true, false,
+            ],
+            vec![
+                vector_at_distance(0),
+                vector_at_distance(1),
+                vector_at_distance(2),
+                vector_at_distance(3),
+                vector_at_distance(4),
+                vector_at_distance(0),
+                vector_at_distance(1),
+                vector_at_distance(2),
+                vector_at_distance(3),
+                vector_at_distance(4),
+                vector_at_distance(0),
+                vector_at_distance(1),
+                vector_at_distance(2),
+                vector_at_distance(3),
+                vector_at_distance(4),
+            ],
+            vec![
+                (1, vec![(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]),
+                (2, vec![(5, 0), (6, 1), (7, 2), (8, 3), (9, 4)]),
+                (4, vec![(10, 0), (11, 1), (12, 2), (13, 3), (14, 4)]),
+            ],
+        );
+
+        let details = fraud_score_details(&query, &records);
+
+        assert_eq!(details.score, 0.8);
+        assert!(details.boundary_case);
+        assert_eq!(records.probes_seen(), vec![1, 2, 4]);
     }
 
     #[test]
