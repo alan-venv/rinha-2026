@@ -14,7 +14,8 @@ const PRIMARY_IVF_PATH: &str = "resources/ivf.bin";
 const FRAUD_IVF_PATH: &str = "resources/ivf-fraud.bin";
 const LEGIT_IVF_PATH: &str = "resources/ivf-legit.bin";
 const SAMPLE_MULTIPLIER: usize = 64;
-const PQ_SAMPLE_MULTIPLIER: usize = 64;
+const PQ_SAMPLE_MULTIPLIER: usize = 512;
+const PQ_ITERATIONS: usize = 30;
 
 type PqSubVector = [i16; PQ_DIMENSIONS_PER_SUBQUANTIZER];
 
@@ -104,6 +105,7 @@ fn build_primary_index(references: &ReferenceDataset, workers: usize) -> Result<
         "all",
         &all_references,
         references.len(),
+        Some(references.fraud_bits()),
         IVF_CENTROIDS,
         Path::new(PRIMARY_IVF_PATH),
         workers,
@@ -122,6 +124,7 @@ fn build_label_index(
         name,
         &label_references,
         references.len(),
+        None,
         IVF_AUX_CENTROIDS,
         output,
         workers,
@@ -148,6 +151,7 @@ fn build_index(
     name: &str,
     references: &impl ReferenceView,
     total_reference_count: usize,
+    fraud_bits: Option<&[u8]>,
     centroid_count: usize,
     output: &Path,
     workers: usize,
@@ -165,7 +169,7 @@ fn build_index(
         PQ_SUBQUANTIZERS,
         PQ_DIMENSIONS_PER_SUBQUANTIZER,
         PQ_CODEWORDS,
-        IVF_ITERATIONS,
+        PQ_ITERATIONS,
         workers,
     );
 
@@ -194,8 +198,10 @@ fn build_index(
         &assignments.offsets,
         &indices,
         &codes,
+        fraud_bits,
     )?;
 
+    let fraud_bits_len = fraud_bits.map_or(0, <[u8]>::len);
     println!(
         "wrote {}: {} bytes",
         output.display(),
@@ -205,6 +211,7 @@ fn build_index(
             + assignments.offsets.len() * size_of::<u32>()
             + indices.len() * size_of::<u32>()
             + codes.len()
+            + fraud_bits_len
     );
 
     Ok(())
@@ -462,7 +469,7 @@ fn train_pq_codebooks(
         );
         let mut codebook = initial_pq_codebook(&samples, subquantizer);
 
-        for _ in 0..IVF_ITERATIONS {
+        for _ in 0..PQ_ITERATIONS {
             refine_pq_codebook(&samples, subquantizer, &mut codebook);
         }
 
@@ -687,6 +694,7 @@ fn write_index(
     offsets: &[u32],
     indices: &[u32],
     codes: &[u8],
+    fraud_bits: Option<&[u8]>,
 ) -> Result<()> {
     let output_file = File::create(output)?;
     let mut writer = BufWriter::new(output_file);
@@ -719,6 +727,9 @@ fn write_index(
     }
 
     writer.write_all(codes)?;
+    if let Some(fraud_bits) = fraud_bits {
+        writer.write_all(fraud_bits)?;
+    }
     writer.flush()?;
     Ok(())
 }
@@ -788,6 +799,10 @@ impl ReferenceDataset {
     fn is_fraud(&self, index: usize) -> bool {
         let byte = self.mmap[self.fraud_offset + index / 8];
         byte & (1 << (index % 8)) != 0
+    }
+
+    fn fraud_bits(&self) -> &[u8] {
+        &self.mmap[self.fraud_offset..]
     }
 }
 

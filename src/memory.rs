@@ -7,7 +7,6 @@ use rinha::*;
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 
-const REFERENCES_PATH: &str = "resources/references.bin";
 const IVF_PATH: &str = "resources/ivf.bin";
 const IVF_FRAUD_PATH: &str = "resources/ivf-fraud.bin";
 const IVF_LEGIT_PATH: &str = "resources/ivf-legit.bin";
@@ -40,69 +39,13 @@ pub trait ReferenceSource {
 }
 
 pub struct IndexedReferences {
-    store: ReferenceStore,
     ivfs: IvfIndexes,
 }
 
-struct ReferenceStore {
-    mmap: Mmap,
-    count: usize,
-    fraud_offset: usize,
-}
-
 pub fn load_references() -> Result<IndexedReferences> {
-    let mmap = map_file(Path::new(REFERENCES_PATH))?;
-    let layout = ReferenceLayout::read(&mmap)?;
-
-    let ivfs = IvfIndexes::load(layout.count)?;
-
     Ok(IndexedReferences {
-        store: ReferenceStore {
-            mmap,
-            count: layout.count,
-            fraud_offset: layout.fraud_offset,
-        },
-        ivfs,
+        ivfs: IvfIndexes::load()?,
     })
-}
-
-struct ReferenceLayout {
-    count: usize,
-    fraud_offset: usize,
-}
-
-impl ReferenceLayout {
-    fn read(mmap: &Mmap) -> Result<Self> {
-        if mmap.len() < REFERENCE_HEADER_LEN {
-            bail!("invalid references binary: file is smaller than header");
-        }
-
-        if &mmap[..REFERENCE_MAGIC.len()] != REFERENCE_MAGIC {
-            bail!("invalid references binary: bad magic");
-        }
-
-        let count = read_u64_at(mmap, REFERENCE_MAGIC.len()) as usize;
-        let fraud_offset = REFERENCE_HEADER_LEN + count * VECTOR_LEN;
-        let expected_len = fraud_offset + count.div_ceil(8);
-
-        if mmap.len() != expected_len {
-            bail!(
-                "invalid references binary: expected {} bytes, got {} bytes",
-                expected_len,
-                mmap.len()
-            );
-        }
-
-        Ok(Self {
-            count,
-            fraud_offset,
-        })
-    }
-}
-
-fn map_file(path: &Path) -> Result<Mmap> {
-    let input_file = File::open(path)?;
-    Ok(unsafe { Mmap::map(&input_file) }?)
 }
 
 fn read_u32_at(bytes: &[u8], offset: usize) -> u32 {
@@ -125,7 +68,7 @@ fn read_u64_at(bytes: &[u8], offset: usize) -> u64 {
 
 impl ReferenceSource for IndexedReferences {
     fn is_fraud(&self, index: usize) -> bool {
-        self.store.is_fraud(index)
+        self.ivfs.is_fraud(index)
     }
 
     fn for_each_primary_candidate_probes(
@@ -136,7 +79,6 @@ impl ReferenceSource for IndexedReferences {
         visit: &mut dyn FnMut(usize, u64),
     ) {
         self.ivfs.for_each_primary_candidate_probes(
-            &self.store,
             vector,
             probes,
             current_worst_top_distance,
@@ -152,20 +94,11 @@ impl ReferenceSource for IndexedReferences {
         visit: &mut dyn FnMut(usize, u64),
     ) {
         self.ivfs.for_each_auxiliary_candidate_probes(
-            &self.store,
             vector,
             probes,
             current_worst_top_distance,
             visit,
         );
-    }
-}
-
-impl ReferenceStore {
-    fn is_fraud(&self, index: usize) -> bool {
-        debug_assert!(index < self.count);
-        let byte = self.mmap[self.fraud_offset + index / 8];
-        byte & (1 << (index % 8)) != 0
     }
 }
 
@@ -252,12 +185,14 @@ fn is_candidate_distance_useful(distance: u64, limit: u64) -> bool {
 
 struct IvfIndex {
     mmap: Mmap,
+    reference_count: usize,
     centroid_count: usize,
     centroids_offset: usize,
     codebooks_offset: usize,
     offsets_offset: usize,
     indices_offset: usize,
     codes_offset: usize,
+    fraud_offset: Option<usize>,
 }
 
 struct IvfIndexes {
@@ -267,17 +202,33 @@ struct IvfIndexes {
 }
 
 impl IvfIndexes {
-    fn load(reference_count: usize) -> Result<Self> {
+    fn load() -> Result<Self> {
+        let primary = IvfIndex::load("IVF_PATH", IVF_PATH, None, true)?;
+        let reference_count = primary.reference_count;
+
         Ok(Self {
-            primary: IvfIndex::load("IVF_PATH", IVF_PATH, reference_count)?,
-            fraud: IvfIndex::load("IVF_FRAUD_PATH", IVF_FRAUD_PATH, reference_count)?,
-            legit: IvfIndex::load("IVF_LEGIT_PATH", IVF_LEGIT_PATH, reference_count)?,
+            primary,
+            fraud: IvfIndex::load(
+                "IVF_FRAUD_PATH",
+                IVF_FRAUD_PATH,
+                Some(reference_count),
+                false,
+            )?,
+            legit: IvfIndex::load(
+                "IVF_LEGIT_PATH",
+                IVF_LEGIT_PATH,
+                Some(reference_count),
+                false,
+            )?,
         })
+    }
+
+    fn is_fraud(&self, index: usize) -> bool {
+        self.primary.is_fraud(index)
     }
 
     fn for_each_primary_candidate_probes(
         &self,
-        _references: &ReferenceStore,
         vector: &ReferenceVector,
         probes: usize,
         current_worst_top_distance: &mut dyn FnMut() -> u64,
@@ -289,7 +240,6 @@ impl IvfIndexes {
 
     fn for_each_auxiliary_candidate_probes(
         &self,
-        _references: &ReferenceStore,
         vector: &ReferenceVector,
         probes: usize,
         current_worst_top_distance: &mut dyn FnMut() -> u64,
@@ -303,22 +253,38 @@ impl IvfIndexes {
 }
 
 impl IvfIndex {
-    fn load(env_key: &str, default_path: &str, reference_count: usize) -> Result<Self> {
+    fn load(
+        env_key: &str,
+        default_path: &str,
+        reference_count: Option<usize>,
+        require_fraud_labels: bool,
+    ) -> Result<Self> {
         let path = env::var(env_key).unwrap_or_else(|_| default_path.to_string());
         let input_file = File::open(Path::new(&path))
             .with_context(|| format!("failed to open required IVF index at {path}"))?;
         let mmap = unsafe { Mmap::map(&input_file) }?;
-        let layout = IvfLayout::read(&mmap, reference_count)?;
+        let layout = IvfLayout::read(&mmap, reference_count, require_fraud_labels)?;
 
         Ok(Self {
             mmap,
+            reference_count: layout.reference_count,
             centroid_count: layout.centroid_count,
             centroids_offset: layout.centroids_offset,
             codebooks_offset: layout.codebooks_offset,
             offsets_offset: layout.offsets_offset,
             indices_offset: layout.indices_offset,
             codes_offset: layout.codes_offset,
+            fraud_offset: layout.fraud_offset,
         })
+    }
+
+    fn is_fraud(&self, index: usize) -> bool {
+        debug_assert!(index < self.reference_count);
+        let fraud_offset = self
+            .fraud_offset
+            .expect("primary IVF index must have embedded fraud labels");
+        let byte = self.mmap[fraud_offset + index / 8];
+        byte & (1 << (index % 8)) != 0
     }
 
     fn for_each_candidate_probes(
@@ -472,16 +438,22 @@ impl IvfIndex {
 
 #[derive(Debug)]
 struct IvfLayout {
+    reference_count: usize,
     centroid_count: usize,
     centroids_offset: usize,
     codebooks_offset: usize,
     offsets_offset: usize,
     indices_offset: usize,
     codes_offset: usize,
+    fraud_offset: Option<usize>,
 }
 
 impl IvfLayout {
-    fn read(bytes: &[u8], reference_count: usize) -> Result<Self> {
+    fn read(
+        bytes: &[u8],
+        expected_reference_count: Option<usize>,
+        require_fraud_labels: bool,
+    ) -> Result<Self> {
         if bytes.len() < IVF_HEADER_LEN {
             bail!("invalid IVF binary: file is smaller than header");
         }
@@ -492,12 +464,14 @@ impl IvfLayout {
 
         let count = read_u64_at(bytes, IVF_MAGIC.len()) as usize;
 
-        if count != reference_count {
-            bail!(
-                "invalid IVF binary: expected {} references, got {}",
-                reference_count,
-                count
-            );
+        if let Some(expected_reference_count) = expected_reference_count {
+            if count != expected_reference_count {
+                bail!(
+                    "invalid IVF binary: expected {} references, got {}",
+                    expected_reference_count,
+                    count
+                );
+            }
         }
 
         let centroid_count_offset = IVF_MAGIC.len() + size_of::<u64>();
@@ -537,7 +511,13 @@ impl IvfLayout {
             + PQ_SUBQUANTIZERS * PQ_CODEWORDS * PQ_DIMENSIONS_PER_SUBQUANTIZER * size_of::<i16>();
         let indices_offset = offsets_offset + (centroid_count + 1) * size_of::<u32>();
         let codes_offset = indices_offset + index_count * size_of::<u32>();
-        let expected_len = codes_offset + index_count * PQ_CODE_LEN;
+        let fraud_offset = codes_offset + index_count * PQ_CODE_LEN;
+        let expected_len = fraud_offset
+            + if require_fraud_labels {
+                count.div_ceil(8)
+            } else {
+                0
+            };
 
         if bytes.len() != expected_len {
             bail!(
@@ -559,12 +539,14 @@ impl IvfLayout {
         }
 
         Ok(Self {
+            reference_count: count,
             centroid_count,
             centroids_offset,
             codebooks_offset,
             offsets_offset,
             indices_offset,
             codes_offset,
+            fraud_offset: require_fraud_labels.then_some(fraud_offset),
         })
     }
 }
@@ -708,8 +690,9 @@ mod tests {
     #[test]
     fn reads_ivf_pq_header_and_offsets() {
         let bytes = sample_ivf_bytes(3, 1, 3);
-        let layout = IvfLayout::read(&bytes, 3).unwrap();
+        let layout = IvfLayout::read(&bytes, Some(3), false).unwrap();
 
+        assert_eq!(layout.reference_count, 3);
         assert_eq!(layout.centroid_count, 1);
         assert_eq!(layout.centroids_offset, IVF_HEADER_LEN);
         assert_eq!(
@@ -723,11 +706,36 @@ mod tests {
     }
 
     #[test]
+    fn reads_embedded_fraud_labels() {
+        let mut bytes = sample_ivf_bytes(3, 1, 3);
+        bytes.push(0b0000_0101);
+        let mmap = mmap_bytes(&bytes);
+        let layout = IvfLayout::read(&mmap, Some(3), true).unwrap();
+        let index = IvfIndex {
+            mmap,
+            reference_count: layout.reference_count,
+            centroid_count: layout.centroid_count,
+            centroids_offset: layout.centroids_offset,
+            codebooks_offset: layout.codebooks_offset,
+            offsets_offset: layout.offsets_offset,
+            indices_offset: layout.indices_offset,
+            codes_offset: layout.codes_offset,
+            fraud_offset: layout.fraud_offset,
+        };
+
+        assert!(index.is_fraud(0));
+        assert!(!index.is_fraud(1));
+        assert!(index.is_fraud(2));
+    }
+
+    #[test]
     fn rejects_old_ivf_flat_magic() {
         let mut bytes = sample_ivf_bytes(3, 1, 3);
         bytes[..IVF_MAGIC.len()].copy_from_slice(b"R26IVF02");
 
-        let error = IvfLayout::read(&bytes, 3).unwrap_err().to_string();
+        let error = IvfLayout::read(&bytes, Some(3), false)
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("bad magic"));
     }
@@ -741,7 +749,9 @@ mod tests {
         bytes[offsets_offset + size_of::<u32>()..offsets_offset + 2 * size_of::<u32>()]
             .copy_from_slice(&2_u32.to_le_bytes());
 
-        let error = IvfLayout::read(&bytes, 3).unwrap_err().to_string();
+        let error = IvfLayout::read(&bytes, Some(3), false)
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("last offset"));
     }
@@ -750,15 +760,17 @@ mod tests {
     fn visits_candidates_with_pq_distances() {
         let bytes = sample_ivf_bytes(3, 1, 3);
         let mmap = mmap_bytes(&bytes);
-        let layout = IvfLayout::read(&mmap, 3).unwrap();
+        let layout = IvfLayout::read(&mmap, Some(3), false).unwrap();
         let index = IvfIndex {
             mmap,
+            reference_count: layout.reference_count,
             centroid_count: layout.centroid_count,
             centroids_offset: layout.centroids_offset,
             codebooks_offset: layout.codebooks_offset,
             offsets_offset: layout.offsets_offset,
             indices_offset: layout.indices_offset,
             codes_offset: layout.codes_offset,
+            fraud_offset: layout.fraud_offset,
         };
         let mut visited = Vec::new();
 

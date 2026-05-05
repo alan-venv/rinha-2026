@@ -5,7 +5,7 @@ pub const VECTOR_LEN: usize = VECTOR_DIMENSIONS * size_of::<i16>();
 pub type ReferenceVector = [i16; VECTOR_DIMENSIONS];
 
 // IVF_PQ
-pub const IVF_MAGIC: &[u8; 8] = b"R26IPQ01";
+pub const IVF_MAGIC: &[u8; 8] = b"R26IPQ02";
 pub const IVF_HEADER_LEN: usize = IVF_MAGIC.len()
     + size_of::<u64>()
     + size_of::<u32>()
@@ -15,13 +15,13 @@ pub const IVF_HEADER_LEN: usize = IVF_MAGIC.len()
     + size_of::<u32>();
 pub const IVF_ITERATIONS: usize = 6;
 
-pub const IVF_CENTROIDS: usize = 16384;
-pub const IVF_AUX_CENTROIDS: usize = 8192;
+pub const IVF_CENTROIDS: usize = 8192;
+pub const IVF_AUX_CENTROIDS: usize = 4096;
 pub const IVF_ASSIGNMENTS_PER_REFERENCE: usize = 2;
 pub const IVF_INITIAL_PROBES: usize = 16;
-pub const PQ_SUBQUANTIZERS: usize = 7;
+pub const PQ_SUBQUANTIZERS: usize = 14;
 pub const PQ_CODEWORDS: usize = 256;
-pub const PQ_DIMENSIONS_PER_SUBQUANTIZER: usize = 2;
+pub const PQ_DIMENSIONS_PER_SUBQUANTIZER: usize = 1;
 pub const PQ_CODE_LEN: usize = PQ_SUBQUANTIZERS;
 
 // REFERENCE
