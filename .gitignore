@@ -16,4 +16,5 @@ AGENTS.md
 /scripts/deploy.sh
 
 ## docs ##
-/docs
+/docs/*
+!/docs/vars.md
