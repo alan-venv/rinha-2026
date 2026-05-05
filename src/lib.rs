@@ -14,10 +14,9 @@ pub const IVF_HEADER_LEN: usize = IVF_MAGIC.len()
     + size_of::<u32>()
     + size_of::<u32>();
 
-// BINS QUALITY
 pub const IVF_ITERATIONS: usize = 20;
 pub const IVF_CENTROIDS: usize = 2048;
-pub const SAMPLE_MULTIPLIER: usize = 16;
+pub const IVF_SAMPLE_MULTIPLIER: usize = 16;
 
 pub const PQ_LAYOUT: (usize, usize) = (2, 7);
 pub const PQ_CODEWORDS: usize = 16;

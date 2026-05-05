@@ -127,7 +127,7 @@ impl IndexIvf {
     }
 
     fn build_primary_index(dataset: &ReferenceDataset, workers: usize) -> Result<()> {
-        let sample_count = SAMPLE_MULTIPLIER * IVF_CENTROIDS;
+        let sample_count = IVF_SAMPLE_MULTIPLIER * IVF_CENTROIDS;
 
         println!(
             "building IVF_PQ: references={}, centroids={}, sample={}, pq={}x{}, codewords={}, iterations={}, workers={}",
