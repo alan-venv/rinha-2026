@@ -1,7 +1,3 @@
-// REFERENCE
-pub const REFERENCE_MAGIC: &[u8; 8] = b"R26RFQ01";
-pub const REFERENCE_HEADER_LEN: usize = REFERENCE_MAGIC.len() + size_of::<u64>();
-
 // COMMON
 pub const VECTOR_DIMENSIONS: usize = 14;
 pub const VECTOR_SCALE: f32 = 10_000.0;
@@ -21,6 +17,9 @@ pub const IVF_HEADER_LEN: usize = IVF_MAGIC.len()
 // BINS QUALITY
 pub const IVF_ITERATIONS: usize = 20;
 pub const IVF_CENTROIDS: usize = 2048;
+pub const SAMPLE_MULTIPLIER: usize = 16;
 
 pub const PQ_LAYOUT: (usize, usize) = (2, 7);
 pub const PQ_CODEWORDS: usize = 16;
+pub const PQ_SAMPLE_MULTIPLIER: usize = 32;
+pub const PQ_ITERATIONS: usize = 0;

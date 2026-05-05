@@ -8,36 +8,84 @@ use rinha::*;
 
 use anyhow::{Result, bail};
 use memmap2::Mmap;
+use serde::Deserialize;
 
-const REFERENCES_PATH: &str = "resources/references.bin";
-const PRIMARY_IVF_PATH: &str = "resources/ivf.bin";
-const SAMPLE_MULTIPLIER: usize = 16;
-const PQ_SAMPLE_MULTIPLIER: usize = 32;
-const PQ_ITERATIONS: usize = 0;
+#[derive(Deserialize)]
+struct ReferenceJson {
+    vector: [f32; VECTOR_DIMENSIONS],
+    label: JsonLabel,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum JsonLabel {
+    Legit,
+    Fraud,
+}
+
+struct ReferenceDataset {
+    vectors: Vec<ReferenceVector>,
+    fraud_bits: Vec<u8>,
+}
+
+impl ReferenceDataset {
+    fn load() -> Result<Self> {
+        let input_file = File::open("resources/references.json")?;
+        let mmap = unsafe { Mmap::map(&input_file) }?;
+        let records: Vec<ReferenceJson> = serde_json::from_slice(&mmap)?;
+        let mut vectors = Vec::with_capacity(records.len());
+        let mut fraud_bits = vec![0_u8; records.len().div_ceil(8)];
+
+        for (index, record) in records.iter().enumerate() {
+            vectors.push(Self::quantize_vector(&record.vector));
+            if matches!(record.label, JsonLabel::Fraud) {
+                fraud_bits[index / 8] |= 1 << (index % 8);
+            }
+        }
+
+        Ok(Self {
+            vectors,
+            fraud_bits,
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.vectors.len()
+    }
+
+    fn vector_at(&self, index: usize) -> ReferenceVector {
+        self.vectors[index]
+    }
+
+    fn fraud_bits(&self) -> &[u8] {
+        &self.fraud_bits
+    }
+
+    fn quantize_vector(vector: &[f32; VECTOR_DIMENSIONS]) -> ReferenceVector {
+        let mut quantized = [0; VECTOR_DIMENSIONS];
+
+        for (output, input) in quantized.iter_mut().zip(vector) {
+            *output = (*input * VECTOR_SCALE).round() as i16;
+        }
+
+        quantized
+    }
+}
 
 type PqSubVector = [i16; PQ_LAYOUT.1];
 
 fn main() -> Result<()> {
-    build_all_indexes()
-}
-
-pub(crate) fn build_all_indexes() -> Result<()> {
     validate_shared_config()?;
 
-    let references = ReferenceDataset::load(Path::new(REFERENCES_PATH))?;
+    let dataset = ReferenceDataset::load()?;
     let workers = worker_count();
 
-    build_primary_index(&references, workers)?;
+    build_primary_index(&dataset, workers)?;
 
     Ok(())
 }
 
 fn validate_shared_config() -> Result<()> {
-    validate_non_zero("centroid count", IVF_CENTROIDS)?;
-    validate_non_zero("PQ subquantizers", PQ_LAYOUT.0)?;
-    validate_non_zero("PQ codewords", PQ_CODEWORDS)?;
-    validate_non_zero("PQ dimensions per subquantizer", PQ_LAYOUT.1)?;
-
     if PQ_LAYOUT.0 * PQ_LAYOUT.1 != VECTOR_DIMENSIONS {
         bail!(
             "invalid PQ layout: {}x{} does not cover {} dimensions",
@@ -54,14 +102,6 @@ fn validate_shared_config() -> Result<()> {
     Ok(())
 }
 
-fn validate_non_zero(name: &str, value: usize) -> Result<()> {
-    if value == 0 {
-        bail!("invalid {name}: {value}");
-    }
-
-    Ok(())
-}
-
 fn build_primary_index(references: &ReferenceDataset, workers: usize) -> Result<()> {
     let all_references = AllReferences::new(references);
     build_index(
@@ -70,7 +110,7 @@ fn build_primary_index(references: &ReferenceDataset, workers: usize) -> Result<
         references.len(),
         Some(references.fraud_bits()),
         IVF_CENTROIDS,
-        Path::new(PRIMARY_IVF_PATH),
+        Path::new("resources/ivf.bin"),
         workers,
     )
 }
@@ -655,71 +695,10 @@ fn write_index(
     Ok(())
 }
 
-struct ReferenceDataset {
-    mmap: Mmap,
-    count: usize,
-    fraud_offset: usize,
-}
-
 trait ReferenceView: Sync {
     fn len(&self) -> usize;
     fn index_at(&self, position: usize) -> usize;
     fn vector_at(&self, position: usize) -> ReferenceVector;
-}
-
-impl ReferenceDataset {
-    fn load(path: &Path) -> Result<Self> {
-        let input_file = File::open(path)?;
-        let mmap = unsafe { Mmap::map(&input_file) }?;
-
-        if mmap.len() < REFERENCE_HEADER_LEN {
-            bail!("invalid references binary: file is smaller than header");
-        }
-
-        if &mmap[..REFERENCE_MAGIC.len()] != REFERENCE_MAGIC {
-            bail!("invalid references binary: bad magic");
-        }
-
-        let mut count_bytes = [0; size_of::<u64>()];
-        count_bytes.copy_from_slice(&mmap[REFERENCE_MAGIC.len()..REFERENCE_HEADER_LEN]);
-        let count = u64::from_le_bytes(count_bytes) as usize;
-        let fraud_offset = REFERENCE_HEADER_LEN + count * VECTOR_LEN;
-        let expected_len = fraud_offset + count.div_ceil(8);
-
-        if mmap.len() != expected_len {
-            bail!(
-                "invalid references binary: expected {} bytes, got {} bytes",
-                expected_len,
-                mmap.len()
-            );
-        }
-
-        Ok(Self {
-            mmap,
-            count,
-            fraud_offset,
-        })
-    }
-
-    fn len(&self) -> usize {
-        self.count
-    }
-
-    fn vector_at(&self, index: usize) -> ReferenceVector {
-        let offset = REFERENCE_HEADER_LEN + index * VECTOR_LEN;
-        let reference = unsafe { self.mmap.as_ptr().add(offset).cast::<i16>() };
-        let mut vector = [0; VECTOR_DIMENSIONS];
-
-        for (dimension, value) in vector.iter_mut().enumerate() {
-            *value = i16::from_le(unsafe { *reference.add(dimension) });
-        }
-
-        vector
-    }
-
-    fn fraud_bits(&self) -> &[u8] {
-        &self.mmap[self.fraud_offset..]
-    }
 }
 
 struct AllReferences<'a> {
