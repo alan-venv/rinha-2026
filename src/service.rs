@@ -8,6 +8,9 @@ use crate::memory::ReferenceSource;
 use rinha::*;
 
 const NEAREST_COUNT: usize = 5;
+const BOUNDARY_LOOKAHEAD_COUNT: usize = 20;
+const BOUNDARY_DISTANCE_RATIO_NUMERATOR: u64 = 150;
+const BOUNDARY_DISTANCE_RATIO_DENOMINATOR: u64 = 100;
 
 pub struct FraudScoreDetails {
     pub score: f32,
@@ -25,10 +28,11 @@ pub fn fraud_score_details(
     records: &(impl ReferenceSource + ?Sized),
 ) -> FraudScoreDetails {
     let nearest = nearest(vector, records, IVF_INITIAL_PROBES);
-    let frauds = fraud_count(&nearest.candidates, records);
+    let score_candidates = &nearest.candidates[..nearest.candidates.len().min(NEAREST_COUNT)];
+    let frauds = fraud_count(score_candidates, records);
 
     FraudScoreDetails {
-        score: frauds as f32 / nearest.candidates.len() as f32,
+        score: frauds as f32 / score_candidates.len() as f32,
         boundary_case: nearest.boundary_case,
     }
 }
@@ -52,7 +56,7 @@ struct NearestResult {
 }
 
 struct TopNearest {
-    candidates: [NearestCandidate; NEAREST_COUNT],
+    candidates: [NearestCandidate; BOUNDARY_LOOKAHEAD_COUNT],
     len: usize,
     farthest_slot: usize,
 }
@@ -63,14 +67,14 @@ impl TopNearest {
             candidates: [NearestCandidate {
                 index: 0,
                 distance: u64::MAX,
-            }; NEAREST_COUNT],
+            }; BOUNDARY_LOOKAHEAD_COUNT],
             len: 0,
             farthest_slot: 0,
         }
     }
 
     fn current_worst_distance(&self) -> u64 {
-        if self.len < NEAREST_COUNT {
+        if self.len < BOUNDARY_LOOKAHEAD_COUNT {
             u64::MAX
         } else {
             self.candidates[self.farthest_slot].distance
@@ -82,7 +86,7 @@ impl TopNearest {
             return;
         }
 
-        if self.len < NEAREST_COUNT {
+        if self.len < BOUNDARY_LOOKAHEAD_COUNT {
             self.candidates[self.len] = candidate;
             self.len += 1;
 
@@ -97,20 +101,6 @@ impl TopNearest {
             self.candidates[self.farthest_slot] = candidate;
             self.farthest_slot = self.find_farthest_slot();
         }
-    }
-
-    fn is_ambiguous(&self, records: &(impl ReferenceSource + ?Sized)) -> bool {
-        if self.len < NEAREST_COUNT {
-            return true;
-        }
-
-        let frauds = self
-            .candidates
-            .iter()
-            .filter(|candidate| records.is_fraud(candidate.index))
-            .count();
-
-        frauds > 0 && frauds < NEAREST_COUNT
     }
 
     fn into_sorted_candidates(self) -> Vec<NearestCandidate> {
@@ -161,13 +151,44 @@ fn nearest(
         },
     );
 
-    let boundary_case = nearest.is_ambiguous(records);
     let candidates = nearest.into_sorted_candidates();
+    let boundary_case = is_boundary_case(&candidates, records);
 
     NearestResult {
         candidates,
         boundary_case,
     }
+}
+
+fn is_boundary_case(
+    candidates: &[NearestCandidate],
+    records: &(impl ReferenceSource + ?Sized),
+) -> bool {
+    if candidates.len() < NEAREST_COUNT {
+        return true;
+    }
+
+    let top = &candidates[..NEAREST_COUNT];
+    let frauds = fraud_count(top, records);
+
+    if frauds > 0 && frauds < NEAREST_COUNT {
+        return true;
+    }
+
+    let pure_label = frauds == NEAREST_COUNT;
+    let boundary_distance = top[NEAREST_COUNT - 1].distance;
+
+    candidates[NEAREST_COUNT..]
+        .iter()
+        .any(|candidate| {
+            records.is_fraud(candidate.index) != pure_label
+                && is_within_boundary_margin(candidate.distance, boundary_distance)
+        })
+}
+
+fn is_within_boundary_margin(distance: u64, boundary_distance: u64) -> bool {
+    distance.saturating_mul(BOUNDARY_DISTANCE_RATIO_DENOMINATOR)
+        <= boundary_distance.saturating_mul(BOUNDARY_DISTANCE_RATIO_NUMERATOR)
 }
 
 #[cfg(test)]
@@ -468,6 +489,7 @@ mod tests {
             nearest(&query, &records, IVF_INITIAL_PROBES)
                 .candidates
                 .iter()
+                .take(NEAREST_COUNT)
                 .map(|candidate| candidate.index)
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 4]
@@ -576,11 +598,11 @@ mod tests {
         let query = [0; VECTOR_DIMENSIONS];
         let records = GroupedRecords {
             frauds: [
-                false, false, false, false, false, true, true, true, true, true,
+                false, false, false, false, false, false, false, false, false, false,
             ],
             groups: [
                 [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)],
-                [(5, 0), (6, 1), (7, 2), (8, 3), (9, 4)],
+                [(5, 5), (6, 6), (7, 7), (8, 8), (9, 9)],
             ],
         };
 
@@ -588,6 +610,23 @@ mod tests {
 
         assert_eq!(details.score, 0.0);
         assert!(!details.boundary_case);
+    }
+
+    #[test]
+    fn marks_boundary_case_when_pure_score_has_opposite_label_in_lookahead() {
+        let query = [0; VECTOR_DIMENSIONS];
+        let records = [
+            record(0, false),
+            record(0, false),
+            record(0, false),
+            record(0, false),
+            record(0, false),
+            record(0, true),
+        ];
+
+        let details = fraud_score_details(&query, &records);
+
+        assert!(details.boundary_case);
     }
 
     #[test]
