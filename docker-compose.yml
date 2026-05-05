@@ -15,8 +15,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.1"
-          memory: "32MB"
+          cpus: "0.20"
+          memory: "50MB"
 
   rinha-service-1:
     image: ghcr.io/alan-venv/rinha-service-2026:latest
@@ -30,8 +30,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "159MB"
+          cpus: "0.40"
+          memory: "150MB"
 
   rinha-service-2:
     image: ghcr.io/alan-venv/rinha-service-2026:latest
@@ -45,8 +45,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "159MB"
+          cpus: "0.40"
+          memory: "150MB"
 
 volumes:
   sockets:
