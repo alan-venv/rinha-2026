@@ -127,8 +127,12 @@ fn build_index(
         workers,
     );
     let assignments = assign_references(references, &centroids, workers);
-    let codebooks =
-        train_pq_codebooks(references, &centroids, &assignments.assignments_by_position);
+    let codebooks = train_pq_codebooks(
+        references,
+        &centroids,
+        &assignments.assignments_by_position,
+        workers,
+    );
     let (indices, codes) = candidate_indices_and_codes(
         references,
         &centroids,
@@ -390,6 +394,7 @@ fn train_pq_codebooks(
     references: &impl ReferenceView,
     centroids: &[ReferenceVector],
     assignments_by_position: &[u32],
+    workers: usize,
 ) -> Vec<PqSubVector> {
     let requested = PQ_SAMPLE_MULTIPLIER * PQ_CODEWORDS;
     let samples = sample_residuals(
@@ -398,21 +403,52 @@ fn train_pq_codebooks(
         assignments_by_position,
         requested.max(PQ_CODEWORDS),
     );
-    let mut codebooks = Vec::with_capacity(PQ_SUBQUANTIZERS * PQ_CODEWORDS);
+    let worker_count = workers.min(PQ_SUBQUANTIZERS).max(1);
+    let subquantizers_per_worker = PQ_SUBQUANTIZERS.div_ceil(worker_count);
+    let codebooks_by_subquantizer = thread::scope(|scope| {
+        let mut tasks = Vec::with_capacity(worker_count);
 
-    for subquantizer in 0..PQ_SUBQUANTIZERS {
-        println!(
-            "training PQ subquantizer {}/{} with {} samples",
-            subquantizer + 1,
-            PQ_SUBQUANTIZERS,
-            samples.len()
-        );
-        let mut codebook = initial_pq_codebook(&samples, subquantizer);
+        for subquantizer_start in (0..PQ_SUBQUANTIZERS).step_by(subquantizers_per_worker) {
+            let samples = &samples;
+            let subquantizer_end =
+                (subquantizer_start + subquantizers_per_worker).min(PQ_SUBQUANTIZERS);
 
-        for _ in 0..PQ_ITERATIONS {
-            refine_pq_codebook(&samples, subquantizer, &mut codebook);
+            tasks.push(scope.spawn(move || {
+                let mut codebooks = Vec::with_capacity(subquantizer_end - subquantizer_start);
+
+                for subquantizer in subquantizer_start..subquantizer_end {
+                    println!(
+                        "training PQ subquantizer {}/{} with {} samples",
+                        subquantizer + 1,
+                        PQ_SUBQUANTIZERS,
+                        samples.len()
+                    );
+                    let mut codebook = initial_pq_codebook(samples, subquantizer);
+
+                    for _ in 0..PQ_ITERATIONS {
+                        refine_pq_codebook(samples, subquantizer, &mut codebook);
+                    }
+
+                    codebooks.push((subquantizer, codebook));
+                }
+
+                codebooks
+            }));
         }
 
+        let mut codebooks_by_subquantizer = vec![Vec::new(); PQ_SUBQUANTIZERS];
+
+        for task in tasks {
+            for (subquantizer, codebook) in task.join().expect("worker thread panicked") {
+                codebooks_by_subquantizer[subquantizer] = codebook;
+            }
+        }
+
+        codebooks_by_subquantizer
+    });
+    let mut codebooks = Vec::with_capacity(PQ_SUBQUANTIZERS * PQ_CODEWORDS);
+
+    for codebook in codebooks_by_subquantizer {
         codebooks.extend(codebook);
     }
 

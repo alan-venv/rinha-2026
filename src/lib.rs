@@ -13,10 +13,10 @@ pub const IVF_HEADER_LEN: usize = IVF_MAGIC.len()
     + size_of::<u32>()
     + size_of::<u32>()
     + size_of::<u32>();
-pub const IVF_ITERATIONS: usize = 6;
+pub const IVF_ITERATIONS: usize = 80; // testar com 20, 40, 80
+pub const IVF_CENTROIDS: usize = 2048;
+pub const IVF_INITIAL_PROBES: usize = 1; // initial candidates max 1464
 
-pub const IVF_CENTROIDS: usize = 4096;
-pub const IVF_INITIAL_PROBES: usize = 1;
 pub const PQ_SUBQUANTIZERS: usize = 7;
 pub const PQ_DIMENSIONS_PER_SUBQUANTIZER: usize = 2;
 pub const PQ_CODEWORDS: usize = 256;
