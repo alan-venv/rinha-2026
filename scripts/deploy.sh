@@ -4,7 +4,7 @@ TAG="ghcr.io/alan-venv/rinha-service-2026:0.1"
 
 docker compose -f docker/docker-compose.yml down
 docker image remove $TAG
-docker build -f docker/dockerfile -t $TAG .
+docker build -f docker/dockerfile --no-cache -t $TAG .
 
 read -rsp "GHCR_TOKEN: " GHCR_TOKEN
 echo
