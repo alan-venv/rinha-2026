@@ -13,7 +13,6 @@ AGENTS.md
 
 ## scripts ##
 /scripts/k6/results.json
-/scripts/deploy.sh
 
 ## docs ##
 /docs/*
