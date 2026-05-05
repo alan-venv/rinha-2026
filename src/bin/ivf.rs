@@ -95,7 +95,7 @@ fn validate_shared_config() -> Result<()> {
         );
     }
 
-    if PQ_CODEWORDS > u8::MAX as usize + 1 {
+    if PQ_CODEWORDS > 256 {
         bail!("invalid PQ codewords: {} > 256", PQ_CODEWORDS);
     }
 
