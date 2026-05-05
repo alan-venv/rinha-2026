@@ -8,7 +8,7 @@ AGENTS.md
 
 ## resources ##
 /resources/backup
-/resources/references.json
+/resources/references/references.json
 /resources/*.bin
 
 ## scripts ##
