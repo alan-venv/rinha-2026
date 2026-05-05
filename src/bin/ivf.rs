@@ -11,8 +11,6 @@ use memmap2::Mmap;
 
 const REFERENCES_PATH: &str = "resources/references.bin";
 const PRIMARY_IVF_PATH: &str = "resources/ivf.bin";
-const FRAUD_IVF_PATH: &str = "resources/ivf-fraud.bin";
-const LEGIT_IVF_PATH: &str = "resources/ivf-legit.bin";
 const SAMPLE_MULTIPLIER: usize = 64;
 const PQ_SAMPLE_MULTIPLIER: usize = 512;
 const PQ_ITERATIONS: usize = 30;
@@ -30,27 +28,12 @@ pub(crate) fn build_all_indexes() -> Result<()> {
     let workers = worker_count();
 
     build_primary_index(&references, workers)?;
-    build_label_index(
-        "fraud",
-        &references,
-        true,
-        Path::new(FRAUD_IVF_PATH),
-        workers,
-    )?;
-    build_label_index(
-        "legit",
-        &references,
-        false,
-        Path::new(LEGIT_IVF_PATH),
-        workers,
-    )?;
 
     Ok(())
 }
 
 fn validate_shared_config() -> Result<()> {
     validate_non_zero("centroid count", IVF_CENTROIDS)?;
-    validate_non_zero("auxiliary centroid count", IVF_AUX_CENTROIDS)?;
     validate_non_zero("PQ subquantizers", PQ_SUBQUANTIZERS)?;
     validate_non_zero("PQ codewords", PQ_CODEWORDS)?;
     validate_non_zero(
@@ -91,25 +74,6 @@ fn build_primary_index(references: &ReferenceDataset, workers: usize) -> Result<
         Some(references.fraud_bits()),
         IVF_CENTROIDS,
         Path::new(PRIMARY_IVF_PATH),
-        workers,
-    )
-}
-
-fn build_label_index(
-    name: &str,
-    references: &ReferenceDataset,
-    is_fraud: bool,
-    output: &Path,
-    workers: usize,
-) -> Result<()> {
-    let label_references = LabelReferences::new(references, is_fraud);
-    build_index(
-        name,
-        &label_references,
-        references.len(),
-        None,
-        IVF_AUX_CENTROIDS,
-        output,
         workers,
     )
 }
@@ -721,11 +685,6 @@ impl ReferenceDataset {
         vector
     }
 
-    fn is_fraud(&self, index: usize) -> bool {
-        let byte = self.mmap[self.fraud_offset + index / 8];
-        byte & (1 << (index % 8)) != 0
-    }
-
     fn fraud_bits(&self) -> &[u8] {
         &self.mmap[self.fraud_offset..]
     }
@@ -752,41 +711,5 @@ impl ReferenceView for AllReferences<'_> {
 
     fn vector_at(&self, position: usize) -> ReferenceVector {
         self.references.vector_at(position)
-    }
-}
-
-struct LabelReferences<'a> {
-    references: &'a ReferenceDataset,
-    indices: Vec<usize>,
-}
-
-impl<'a> LabelReferences<'a> {
-    fn new(references: &'a ReferenceDataset, is_fraud: bool) -> Self {
-        let mut indices = Vec::new();
-
-        for index in 0..references.len() {
-            if references.is_fraud(index) == is_fraud {
-                indices.push(index);
-            }
-        }
-
-        Self {
-            references,
-            indices,
-        }
-    }
-}
-
-impl ReferenceView for LabelReferences<'_> {
-    fn len(&self) -> usize {
-        self.indices.len()
-    }
-
-    fn index_at(&self, position: usize) -> usize {
-        self.indices[position]
-    }
-
-    fn vector_at(&self, position: usize) -> ReferenceVector {
-        self.references.vector_at(self.index_at(position))
     }
 }

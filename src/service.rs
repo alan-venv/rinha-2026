@@ -9,11 +9,28 @@ use rinha::*;
 
 const NEAREST_COUNT: usize = 5;
 
-pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> f32 {
-    let nearest = nearest(vector, records, IVF_INITIAL_PROBES);
-    let frauds = fraud_count(&nearest, records);
+#[allow(dead_code)]
+pub struct FraudScoreDetails {
+    pub score: f32,
+    pub boundary_case: bool,
+}
 
-    frauds as f32 / nearest.len() as f32
+#[allow(dead_code)]
+pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> f32 {
+    fraud_score_details(vector, records).score
+}
+
+pub fn fraud_score_details(
+    vector: &ReferenceVector,
+    records: &(impl ReferenceSource + ?Sized),
+) -> FraudScoreDetails {
+    let nearest = nearest(vector, records, IVF_INITIAL_PROBES);
+    let frauds = fraud_count(&nearest.candidates, records);
+
+    FraudScoreDetails {
+        score: frauds as f32 / nearest.candidates.len() as f32,
+        boundary_case: nearest.boundary_case,
+    }
 }
 
 fn fraud_count(nearest: &[(usize, u64)], records: &(impl ReferenceSource + ?Sized)) -> usize {
@@ -23,11 +40,16 @@ fn fraud_count(nearest: &[(usize, u64)], records: &(impl ReferenceSource + ?Size
         .count()
 }
 
+struct NearestResult {
+    candidates: Vec<(usize, u64)>,
+    boundary_case: bool,
+}
+
 fn nearest(
     vector: &ReferenceVector,
     records: &(impl ReferenceSource + ?Sized),
     probes: usize,
-) -> Vec<(usize, u64)> {
+) -> NearestResult {
     let mut nearest_indexes = [0; NEAREST_COUNT];
     let mut nearest_distances = [u64::MAX; NEAREST_COUNT];
     let mut nearest_len = 0;
@@ -70,9 +92,7 @@ fn nearest(
 
     collect_candidates!(for_each_primary_candidate_probes);
 
-    if is_ambiguous_nearest(&nearest_indexes, nearest_len, records) {
-        collect_candidates!(for_each_auxiliary_candidate_probes);
-    }
+    let boundary_case = is_ambiguous_nearest(&nearest_indexes, nearest_len, records);
 
     let mut nearest = Vec::with_capacity(nearest_len);
 
@@ -81,7 +101,10 @@ fn nearest(
     }
 
     nearest.sort_unstable_by_key(|(_, distance)| *distance);
-    nearest
+    NearestResult {
+        candidates: nearest,
+        boundary_case,
+    }
 }
 
 fn nearest_contains(
@@ -274,20 +297,6 @@ mod tests {
                 visit(*index, *distance);
             }
         }
-
-        fn for_each_auxiliary_candidate_probes(
-            &self,
-            _vector: &ReferenceVector,
-            probes: usize,
-            _current_worst_top_distance: &mut dyn FnMut() -> u64,
-            visit: &mut dyn FnMut(usize, u64),
-        ) {
-            let _ = probes;
-
-            for (index, distance) in &self.groups[1] {
-                visit(*index, *distance);
-            }
-        }
     }
 
     #[test]
@@ -431,6 +440,7 @@ mod tests {
 
         assert_eq!(
             nearest(&query, &records, IVF_INITIAL_PROBES)
+                .candidates
                 .iter()
                 .map(|(index, _)| *index)
                 .collect::<Vec<_>>(),
@@ -460,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn consults_auxiliary_candidates_when_score_is_zero_point_six() {
+    fn marks_boundary_case_when_score_is_zero_point_six() {
         let query = [0; VECTOR_DIMENSIONS];
         let records = GroupedRecords {
             frauds: [
@@ -472,11 +482,14 @@ mod tests {
             ],
         };
 
-        assert_eq!(fraud_score(&query, &records), 0.8);
+        let details = fraud_score_details(&query, &records);
+
+        assert_eq!(details.score, 0.6);
+        assert!(details.boundary_case);
     }
 
     #[test]
-    fn consults_auxiliary_candidates_when_score_is_zero_point_four() {
+    fn marks_boundary_case_when_score_is_zero_point_four() {
         let query = [0; VECTOR_DIMENSIONS];
         let records = GroupedRecords {
             frauds: [
@@ -488,11 +501,14 @@ mod tests {
             ],
         };
 
-        assert_eq!(fraud_score(&query, &records), 0.8);
+        let details = fraud_score_details(&query, &records);
+
+        assert_eq!(details.score, 0.4);
+        assert!(details.boundary_case);
     }
 
     #[test]
-    fn consults_auxiliary_candidates_when_score_is_zero_point_two() {
+    fn marks_boundary_case_when_score_is_zero_point_two() {
         let query = [0; VECTOR_DIMENSIONS];
         let records = GroupedRecords {
             frauds: [
@@ -504,11 +520,14 @@ mod tests {
             ],
         };
 
-        assert_eq!(fraud_score(&query, &records), 0.6);
+        let details = fraud_score_details(&query, &records);
+
+        assert_eq!(details.score, 0.2);
+        assert!(details.boundary_case);
     }
 
     #[test]
-    fn consults_auxiliary_candidates_when_score_is_zero_point_eight() {
+    fn marks_boundary_case_when_score_is_zero_point_eight() {
         let query = [0; VECTOR_DIMENSIONS];
         let records = GroupedRecords {
             frauds: [
@@ -520,11 +539,14 @@ mod tests {
             ],
         };
 
-        assert_eq!(fraud_score(&query, &records), 0.6);
+        let details = fraud_score_details(&query, &records);
+
+        assert_eq!(details.score, 0.8);
+        assert!(details.boundary_case);
     }
 
     #[test]
-    fn skips_auxiliary_candidates_when_score_is_pure() {
+    fn does_not_mark_boundary_case_when_score_is_pure() {
         let query = [0; VECTOR_DIMENSIONS];
         let records = GroupedRecords {
             frauds: [
@@ -536,11 +558,14 @@ mod tests {
             ],
         };
 
-        assert_eq!(fraud_score(&query, &records), 0.0);
+        let details = fraud_score_details(&query, &records);
+
+        assert_eq!(details.score, 0.0);
+        assert!(!details.boundary_case);
     }
 
     #[test]
-    fn ignores_duplicate_candidates_already_in_top_5() {
+    fn ignores_duplicate_candidates_in_primary_results() {
         let query = [0; VECTOR_DIMENSIONS];
         let records = GroupedRecords {
             frauds: [
@@ -554,10 +579,11 @@ mod tests {
 
         assert_eq!(
             nearest(&query, &records, IVF_INITIAL_PROBES)
+                .candidates
                 .iter()
                 .map(|(index, _)| *index)
                 .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4]
+            vec![0, 1, 2, 3]
         );
     }
 }

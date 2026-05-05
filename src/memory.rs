@@ -8,8 +8,6 @@ use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 
 const IVF_PATH: &str = "resources/ivf.bin";
-const IVF_FRAUD_PATH: &str = "resources/ivf-fraud.bin";
-const IVF_LEGIT_PATH: &str = "resources/ivf-legit.bin";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReferenceRecord {
@@ -27,15 +25,6 @@ pub trait ReferenceSource {
         current_worst_top_distance: &mut dyn FnMut() -> u64,
         visit: &mut dyn FnMut(usize, u64),
     );
-
-    fn for_each_auxiliary_candidate_probes(
-        &self,
-        _vector: &ReferenceVector,
-        _probes: usize,
-        _current_worst_top_distance: &mut dyn FnMut() -> u64,
-        _visit: &mut dyn FnMut(usize, u64),
-    ) {
-    }
 }
 
 pub struct IndexedReferences {
@@ -79,21 +68,6 @@ impl ReferenceSource for IndexedReferences {
         visit: &mut dyn FnMut(usize, u64),
     ) {
         self.ivfs.for_each_primary_candidate_probes(
-            vector,
-            probes,
-            current_worst_top_distance,
-            visit,
-        );
-    }
-
-    fn for_each_auxiliary_candidate_probes(
-        &self,
-        vector: &ReferenceVector,
-        probes: usize,
-        current_worst_top_distance: &mut dyn FnMut() -> u64,
-        visit: &mut dyn FnMut(usize, u64),
-    ) {
-        self.ivfs.for_each_auxiliary_candidate_probes(
             vector,
             probes,
             current_worst_top_distance,
@@ -197,29 +171,12 @@ struct IvfIndex {
 
 struct IvfIndexes {
     primary: IvfIndex,
-    fraud: IvfIndex,
-    legit: IvfIndex,
 }
 
 impl IvfIndexes {
     fn load() -> Result<Self> {
-        let primary = IvfIndex::load("IVF_PATH", IVF_PATH, None, true)?;
-        let reference_count = primary.reference_count;
-
         Ok(Self {
-            primary,
-            fraud: IvfIndex::load(
-                "IVF_FRAUD_PATH",
-                IVF_FRAUD_PATH,
-                Some(reference_count),
-                false,
-            )?,
-            legit: IvfIndex::load(
-                "IVF_LEGIT_PATH",
-                IVF_LEGIT_PATH,
-                Some(reference_count),
-                false,
-            )?,
+            primary: IvfIndex::load("IVF_PATH", IVF_PATH, None, true)?,
         })
     }
 
@@ -235,19 +192,6 @@ impl IvfIndexes {
         visit: &mut dyn FnMut(usize, u64),
     ) {
         self.primary
-            .for_each_candidate_probes(vector, probes, current_worst_top_distance, visit);
-    }
-
-    fn for_each_auxiliary_candidate_probes(
-        &self,
-        vector: &ReferenceVector,
-        probes: usize,
-        current_worst_top_distance: &mut dyn FnMut() -> u64,
-        visit: &mut dyn FnMut(usize, u64),
-    ) {
-        self.fraud
-            .for_each_candidate_probes(vector, probes, current_worst_top_distance, visit);
-        self.legit
             .for_each_candidate_probes(vector, probes, current_worst_top_distance, visit);
     }
 }
