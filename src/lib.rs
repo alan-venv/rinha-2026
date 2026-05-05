@@ -13,7 +13,7 @@ pub const IVF_HEADER_LEN: usize = IVF_MAGIC.len()
     + size_of::<u32>()
     + size_of::<u32>()
     + size_of::<u32>();
-pub const IVF_ITERATIONS: usize = 80; // testar com 20, 40, 80
+pub const IVF_ITERATIONS: usize = 80; // testar com 20, 40, 80 Objetivo: achar o menor valor que zera primary_only. Se 40 ou 60 também zerar, prefira o menor.
 pub const IVF_CENTROIDS: usize = 2048;
 pub const IVF_INITIAL_PROBES: usize = 1; // initial candidates max 1464
 
