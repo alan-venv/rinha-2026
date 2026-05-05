@@ -17,7 +17,6 @@ pub const IVF_ITERATIONS: usize = 6;
 
 pub const IVF_CENTROIDS: usize = 8192;
 pub const IVF_AUX_CENTROIDS: usize = 4096;
-pub const IVF_ASSIGNMENTS_PER_REFERENCE: usize = 2;
 pub const IVF_INITIAL_PROBES: usize = 16;
 pub const PQ_SUBQUANTIZERS: usize = 14;
 pub const PQ_CODEWORDS: usize = 256;

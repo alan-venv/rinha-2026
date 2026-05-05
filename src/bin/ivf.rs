@@ -51,7 +51,6 @@ pub(crate) fn build_all_indexes() -> Result<()> {
 fn validate_shared_config() -> Result<()> {
     validate_non_zero("centroid count", IVF_CENTROIDS)?;
     validate_non_zero("auxiliary centroid count", IVF_AUX_CENTROIDS)?;
-    validate_non_zero("assignments per reference", IVF_ASSIGNMENTS_PER_REFERENCE)?;
     validate_non_zero("PQ subquantizers", PQ_SUBQUANTIZERS)?;
     validate_non_zero("PQ codewords", PQ_CODEWORDS)?;
     validate_non_zero(
@@ -70,22 +69,6 @@ fn validate_shared_config() -> Result<()> {
 
     if PQ_CODEWORDS > u8::MAX as usize + 1 {
         bail!("invalid PQ codewords: {} > 256", PQ_CODEWORDS);
-    }
-
-    if IVF_ASSIGNMENTS_PER_REFERENCE > IVF_CENTROIDS {
-        bail!(
-            "invalid assignments per reference for primary IVF: {} > {}",
-            IVF_ASSIGNMENTS_PER_REFERENCE,
-            IVF_CENTROIDS
-        );
-    }
-
-    if IVF_ASSIGNMENTS_PER_REFERENCE > IVF_AUX_CENTROIDS {
-        bail!(
-            "invalid assignments per reference for auxiliary IVF: {} > {}",
-            IVF_ASSIGNMENTS_PER_REFERENCE,
-            IVF_AUX_CENTROIDS
-        );
     }
 
     Ok(())
@@ -161,10 +144,9 @@ fn build_index(
     let sample_count = SAMPLE_MULTIPLIER * centroid_count;
 
     println!(
-        "building {name} IVF_PQ: references={}, centroids={}, assignments_per_reference={}, sample={}, pq={}x{}, codewords={}, iterations={}, workers={}",
+        "building {name} IVF_PQ: references={}, centroids={}, sample={}, pq={}x{}, codewords={}, iterations={}, workers={}",
         references.len(),
         centroid_count,
-        IVF_ASSIGNMENTS_PER_REFERENCE,
         sample_count,
         PQ_SUBQUANTIZERS,
         PQ_DIMENSIONS_PER_SUBQUANTIZER,
@@ -342,13 +324,9 @@ fn assign_references(
 
                 for position in chunk_start..chunk_end {
                     let vector = references.vector_at(position);
-                    let nearest =
-                        nearest_centroids::<IVF_ASSIGNMENTS_PER_REFERENCE>(centroids, &vector);
-                    assignments.push(nearest.map(|centroid| centroid as u32));
-
-                    for centroid in nearest {
-                        counts[centroid] += 1;
-                    }
+                    let centroid = nearest_centroid(centroids, &vector);
+                    assignments.push(centroid as u32);
+                    counts[centroid] += 1;
                 }
 
                 AssignmentChunk {
@@ -394,12 +372,12 @@ fn assign_references(
 
 struct Assignments {
     offsets: Vec<u32>,
-    assignments_by_position: Vec<[u32; IVF_ASSIGNMENTS_PER_REFERENCE]>,
+    assignments_by_position: Vec<u32>,
 }
 
 struct AssignmentChunk {
     start: usize,
-    assignments: Vec<[u32; IVF_ASSIGNMENTS_PER_REFERENCE]>,
+    assignments: Vec<u32>,
     centroid_counts: Vec<u32>,
 }
 
@@ -418,29 +396,27 @@ fn candidate_indices_and_codes(
     centroids: &[ReferenceVector],
     codebooks: &[PqSubVector],
     offsets: &[u32],
-    assignments_by_position: Vec<[u32; IVF_ASSIGNMENTS_PER_REFERENCE]>,
+    assignments_by_position: Vec<u32>,
 ) -> (Vec<u32>, Vec<u8>) {
     let mut cursors = offsets[..offsets.len() - 1].to_vec();
-    let entry_count = references.len() * IVF_ASSIGNMENTS_PER_REFERENCE;
+    let entry_count = references.len();
     let mut indices = vec![0_u32; entry_count];
     let mut codes = vec![0_u8; entry_count * PQ_CODE_LEN];
 
-    for (position, assigned_centroids) in assignments_by_position.into_iter().enumerate() {
+    for (position, centroid) in assignments_by_position.into_iter().enumerate() {
         let reference_index = references.index_at(position);
         let vector = references.vector_at(position);
 
-        for centroid in assigned_centroids {
-            let cursor = &mut cursors[centroid as usize];
-            let entry = *cursor as usize;
-            indices[entry] = reference_index as u32;
-            encode_residual(
-                &vector,
-                &centroids[centroid as usize],
-                codebooks,
-                &mut codes[entry * PQ_CODE_LEN..(entry + 1) * PQ_CODE_LEN],
-            );
-            *cursor += 1;
-        }
+        let cursor = &mut cursors[centroid as usize];
+        let entry = *cursor as usize;
+        indices[entry] = reference_index as u32;
+        encode_residual(
+            &vector,
+            &centroids[centroid as usize],
+            codebooks,
+            &mut codes[entry * PQ_CODE_LEN..(entry + 1) * PQ_CODE_LEN],
+        );
+        *cursor += 1;
     }
 
     (indices, codes)
@@ -449,7 +425,7 @@ fn candidate_indices_and_codes(
 fn train_pq_codebooks(
     references: &impl ReferenceView,
     centroids: &[ReferenceVector],
-    assignments_by_position: &[[u32; IVF_ASSIGNMENTS_PER_REFERENCE]],
+    assignments_by_position: &[u32],
 ) -> Vec<PqSubVector> {
     let requested = PQ_SAMPLE_MULTIPLIER * PQ_CODEWORDS;
     let samples = sample_residuals(
@@ -482,19 +458,16 @@ fn train_pq_codebooks(
 fn sample_residuals(
     references: &impl ReferenceView,
     centroids: &[ReferenceVector],
-    assignments_by_position: &[[u32; IVF_ASSIGNMENTS_PER_REFERENCE]],
+    assignments_by_position: &[u32],
     requested_count: usize,
 ) -> Vec<ReferenceVector> {
-    let entry_count = references.len() * IVF_ASSIGNMENTS_PER_REFERENCE;
-    let sample_count = requested_count.min(entry_count);
+    let sample_count = requested_count.min(references.len());
     let mut samples = Vec::with_capacity(sample_count);
 
     for sample in 0..sample_count {
-        let entry = sample * entry_count / sample_count;
-        let position = entry / IVF_ASSIGNMENTS_PER_REFERENCE;
-        let assignment = entry % IVF_ASSIGNMENTS_PER_REFERENCE;
+        let position = sample * references.len() / sample_count;
         let vector = references.vector_at(position);
-        let centroid = &centroids[assignments_by_position[position][assignment] as usize];
+        let centroid = &centroids[assignments_by_position[position] as usize];
         samples.push(residual_vector(&vector, centroid));
     }
 
@@ -621,54 +594,6 @@ fn nearest_centroid(centroids: &[ReferenceVector], vector: &ReferenceVector) -> 
     }
 
     nearest
-}
-
-fn nearest_centroids<const N: usize>(
-    centroids: &[ReferenceVector],
-    vector: &ReferenceVector,
-) -> [usize; N] {
-    let mut nearest = [0; N];
-    let mut nearest_distances = [u64::MAX; N];
-    let mut filled = 0;
-    let mut farthest_slot = 0;
-
-    for (index, centroid) in centroids.iter().enumerate() {
-        let limit = if filled < N {
-            u64::MAX
-        } else {
-            nearest_distances[farthest_slot]
-        };
-        let distance = distance2_limited(vector, centroid, limit);
-
-        if filled < N {
-            nearest[filled] = index;
-            nearest_distances[filled] = distance;
-
-            if distance > nearest_distances[farthest_slot] {
-                farthest_slot = filled;
-            }
-
-            filled += 1;
-        } else if distance < nearest_distances[farthest_slot] {
-            nearest[farthest_slot] = index;
-            nearest_distances[farthest_slot] = distance;
-            farthest_slot = farthest_slot_in(&nearest_distances);
-        }
-    }
-
-    nearest
-}
-
-fn farthest_slot_in(distances: &[u64]) -> usize {
-    let mut farthest_slot = 0;
-
-    for slot in 1..distances.len() {
-        if distances[slot] > distances[farthest_slot] {
-            farthest_slot = slot;
-        }
-    }
-
-    farthest_slot
 }
 
 fn distance2_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64) -> u64 {
