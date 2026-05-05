@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 
 const IVF_PATH: &str = "resources/ivf.bin";
+const REFERENCES_PATH: &str = "resources/references.bin";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReferenceRecord {
@@ -17,6 +18,8 @@ pub struct ReferenceRecord {
 
 pub trait ReferenceSource {
     fn is_fraud(&self, index: usize) -> bool;
+
+    fn exact_vector(&self, index: usize) -> Option<ReferenceVector>;
 
     fn for_each_primary_candidate_probes(
         &self,
@@ -29,11 +32,16 @@ pub trait ReferenceSource {
 
 pub struct IndexedReferences {
     ivfs: IvfIndexes,
+    exact: ExactReferences,
 }
 
 pub fn load_references() -> Result<IndexedReferences> {
+    let ivfs = IvfIndexes::load()?;
+    let exact = ExactReferences::load("REFERENCES_PATH", REFERENCES_PATH, ivfs.reference_count())?;
+
     Ok(IndexedReferences {
-        ivfs: IvfIndexes::load()?,
+        ivfs,
+        exact,
     })
 }
 
@@ -60,6 +68,10 @@ impl ReferenceSource for IndexedReferences {
         self.ivfs.is_fraud(index)
     }
 
+    fn exact_vector(&self, index: usize) -> Option<ReferenceVector> {
+        Some(self.exact.vector_at(index))
+    }
+
     fn for_each_primary_candidate_probes(
         &self,
         vector: &ReferenceVector,
@@ -79,6 +91,10 @@ impl ReferenceSource for IndexedReferences {
 impl ReferenceSource for [ReferenceRecord] {
     fn is_fraud(&self, index: usize) -> bool {
         self[index].is_fraud
+    }
+
+    fn exact_vector(&self, index: usize) -> Option<ReferenceVector> {
+        Some(self[index].vector)
     }
 
     fn for_each_primary_candidate_probes(
@@ -103,6 +119,10 @@ impl ReferenceSource for [ReferenceRecord] {
 impl<const N: usize> ReferenceSource for [ReferenceRecord; N] {
     fn is_fraud(&self, index: usize) -> bool {
         self[index].is_fraud
+    }
+
+    fn exact_vector(&self, index: usize) -> Option<ReferenceVector> {
+        self.as_slice().exact_vector(index)
     }
 
     fn for_each_primary_candidate_probes(
@@ -184,6 +204,10 @@ impl IvfIndexes {
         self.primary.is_fraud(index)
     }
 
+    fn reference_count(&self) -> usize {
+        self.primary.reference_count
+    }
+
     fn for_each_primary_candidate_probes(
         &self,
         vector: &ReferenceVector,
@@ -193,6 +217,63 @@ impl IvfIndexes {
     ) {
         self.primary
             .for_each_candidate_probes(vector, probes, current_worst_top_distance, visit);
+    }
+}
+
+struct ExactReferences {
+    mmap: Mmap,
+    count: usize,
+}
+
+impl ExactReferences {
+    fn load(env_key: &str, default_path: &str, expected_count: usize) -> Result<Self> {
+        let path = env::var(env_key).unwrap_or_else(|_| default_path.to_string());
+        let input_file = File::open(Path::new(&path))
+            .with_context(|| format!("failed to open required references at {path}"))?;
+        let mmap = unsafe { Mmap::map(&input_file) }?;
+
+        if mmap.len() < REFERENCE_HEADER_LEN {
+            bail!("invalid references binary: file is smaller than header");
+        }
+
+        if &mmap[..REFERENCE_MAGIC.len()] != REFERENCE_MAGIC {
+            bail!("invalid references binary: bad magic");
+        }
+
+        let count = read_u64_at(&mmap, REFERENCE_MAGIC.len()) as usize;
+
+        if count != expected_count {
+            bail!(
+                "invalid references binary: expected {} references, got {}",
+                expected_count,
+                count
+            );
+        }
+
+        let expected_len = REFERENCE_HEADER_LEN + count * VECTOR_LEN + count.div_ceil(8);
+
+        if mmap.len() != expected_len {
+            bail!(
+                "invalid references binary: expected {} bytes, got {} bytes",
+                expected_len,
+                mmap.len()
+            );
+        }
+
+        Ok(Self { mmap, count })
+    }
+
+    fn vector_at(&self, index: usize) -> ReferenceVector {
+        debug_assert!(index < self.count);
+        let offset = REFERENCE_HEADER_LEN + index * VECTOR_LEN;
+        let reference = unsafe { self.mmap.as_ptr().add(offset).cast::<i16>() };
+        let mut vector = [0; VECTOR_DIMENSIONS];
+
+        for (dimension, value) in vector.iter_mut().enumerate() {
+            *value = i16::from_le(unsafe { *reference.add(dimension) });
+        }
+
+        vector
     }
 }
 

@@ -28,7 +28,13 @@ pub fn fraud_score_details(
     records: &(impl ReferenceSource + ?Sized),
 ) -> FraudScoreDetails {
     let nearest = nearest(vector, records, IVF_INITIAL_PROBES);
-    let score_candidates = &nearest.candidates[..nearest.candidates.len().min(NEAREST_COUNT)];
+    let exact_candidates = if nearest.boundary_case {
+        exact_rerank(vector, &nearest.candidates, records)
+    } else {
+        None
+    };
+    let candidates = exact_candidates.as_deref().unwrap_or(&nearest.candidates);
+    let score_candidates = &candidates[..candidates.len().min(NEAREST_COUNT)];
     let frauds = fraud_count(score_candidates, records);
 
     FraudScoreDetails {
@@ -42,6 +48,35 @@ fn fraud_count(nearest: &[NearestCandidate], records: &(impl ReferenceSource + ?
         .iter()
         .filter(|candidate| records.is_fraud(candidate.index))
         .count()
+}
+
+fn exact_rerank(
+    vector: &ReferenceVector,
+    candidates: &[NearestCandidate],
+    records: &(impl ReferenceSource + ?Sized),
+) -> Option<Vec<NearestCandidate>> {
+    let mut reranked = Vec::with_capacity(candidates.len());
+
+    for candidate in candidates {
+        let reference = records.exact_vector(candidate.index)?;
+        reranked.push(NearestCandidate {
+            index: candidate.index,
+            distance: exact_distance2(vector, &reference),
+        });
+    }
+
+    reranked.sort_unstable_by_key(|candidate| candidate.distance);
+    Some(reranked)
+}
+
+fn exact_distance2(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
+    a.iter()
+        .zip(b)
+        .map(|(left, right)| {
+            let delta = i64::from(*left) - i64::from(*right);
+            (delta * delta) as u64
+        })
+        .sum()
 }
 
 #[derive(Clone, Copy)]
@@ -193,13 +228,7 @@ fn is_within_boundary_margin(distance: u64, boundary_distance: u64) -> bool {
 
 #[cfg(test)]
 fn euclidean_distance2(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
-    a.iter()
-        .zip(b)
-        .map(|(left, right)| {
-            let delta = i64::from(*left) - i64::from(*right);
-            (delta * delta) as u64
-        })
-        .sum()
+    exact_distance2(a, b)
 }
 
 pub fn vectorization(request: ContentRequest) -> ReferenceVector {
@@ -329,6 +358,10 @@ mod tests {
     impl ReferenceSource for GroupedRecords {
         fn is_fraud(&self, index: usize) -> bool {
             self.frauds[index]
+        }
+
+        fn exact_vector(&self, _index: usize) -> Option<ReferenceVector> {
+            None
         }
 
         fn for_each_primary_candidate_probes(

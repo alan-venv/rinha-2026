@@ -9,5 +9,6 @@ RUN cargo build --release --bin rinha
 FROM gcr.io/distroless/cc-debian13
 WORKDIR /app
 COPY resources/ivf.bin ./resources/
+COPY resources/references.bin ./resources/
 COPY --from=build /app/target/release/rinha .
 ENTRYPOINT [ "./rinha" ]
