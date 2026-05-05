@@ -19,8 +19,10 @@ services:
           memory: "50MB"
 
   rinha-service-1:
-    image: ghcr.io/alan-venv/rinha-service-2026:latest
+    image: ghcr.io/alan-venv/rinha-service-2026:0.1
     container_name: rinha-service-1
+    security_opt:
+      - seccomp=unconfined
     environment:
       - SOCKET=/sockets/service-1.sock
     volumes:
@@ -34,8 +36,10 @@ services:
           memory: "150MB"
 
   rinha-service-2:
-    image: ghcr.io/alan-venv/rinha-service-2026:latest
+    image: ghcr.io/alan-venv/rinha-service-2026:0.1
     container_name: rinha-service-2
+    security_opt:
+      - seccomp=unconfined
     environment:
       - SOCKET=/sockets/service-2.sock
     volumes:
