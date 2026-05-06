@@ -7,7 +7,8 @@ use crate::dto::{ContentRequest, Customer, LastTransaction, Merchant, Transactio
 use crate::memory::ReferenceSource;
 use rinha::*;
 
-const NEAREST_COUNT: usize = 5;
+const SCORE_NEAREST_COUNT: usize = 5;
+const BOUNDARY_NEAREST_COUNT: usize = 10;
 
 pub struct FraudScoreDetails {
     pub score: f32,
@@ -26,7 +27,7 @@ pub fn fraud_score_details(
 ) -> FraudScoreDetails {
     let nearest_result = nearest(vector, records);
     let candidates = nearest_result.candidates();
-    let score_candidates = &candidates[..candidates.len().min(NEAREST_COUNT)];
+    let score_candidates = &candidates[..candidates.len().min(SCORE_NEAREST_COUNT)];
     let top_fraud_count = fraud_count(score_candidates, records);
 
     FraudScoreDetails {
@@ -60,7 +61,7 @@ struct NearestCandidate {
 }
 
 struct NearestResult {
-    candidates: [NearestCandidate; NEAREST_COUNT],
+    candidates: [NearestCandidate; BOUNDARY_NEAREST_COUNT],
     len: usize,
     boundary_case: bool,
 }
@@ -72,7 +73,7 @@ impl NearestResult {
 }
 
 struct TopNearest {
-    candidates: [NearestCandidate; NEAREST_COUNT],
+    candidates: [NearestCandidate; BOUNDARY_NEAREST_COUNT],
     len: usize,
     farthest_slot: usize,
 }
@@ -83,14 +84,14 @@ impl TopNearest {
             candidates: [NearestCandidate {
                 index: 0,
                 distance: u64::MAX,
-            }; NEAREST_COUNT],
+            }; BOUNDARY_NEAREST_COUNT],
             len: 0,
             farthest_slot: 0,
         }
     }
 
     fn current_worst_distance(&self) -> u64 {
-        if self.len < NEAREST_COUNT {
+        if self.len < BOUNDARY_NEAREST_COUNT {
             u64::MAX
         } else {
             self.candidates[self.farthest_slot].distance
@@ -98,7 +99,8 @@ impl TopNearest {
     }
 
     fn add(&mut self, candidate: NearestCandidate) {
-        if self.len == NEAREST_COUNT && candidate.distance >= self.current_worst_distance() {
+        if self.len == BOUNDARY_NEAREST_COUNT && candidate.distance >= self.current_worst_distance()
+        {
             return;
         }
 
@@ -106,7 +108,7 @@ impl TopNearest {
             return;
         }
 
-        if self.len < NEAREST_COUNT {
+        if self.len < BOUNDARY_NEAREST_COUNT {
             self.candidates[self.len] = candidate;
             self.len += 1;
 
@@ -171,14 +173,14 @@ fn is_boundary_case(
     candidates: &[NearestCandidate],
     records: &(impl ReferenceSource + ?Sized),
 ) -> bool {
-    if candidates.len() < NEAREST_COUNT {
+    if candidates.len() < SCORE_NEAREST_COUNT {
         return true;
     }
 
-    let top = &candidates[..NEAREST_COUNT];
+    let top = &candidates[..candidates.len().min(BOUNDARY_NEAREST_COUNT)];
     let frauds = fraud_count(top, records);
 
-    if frauds > 0 && frauds < NEAREST_COUNT {
+    if frauds > 0 && frauds < top.len() {
         return true;
     }
 
@@ -477,7 +479,7 @@ mod tests {
             nearest(&query, &records)
                 .candidates()
                 .iter()
-                .take(NEAREST_COUNT)
+                .take(SCORE_NEAREST_COUNT)
                 .map(|candidate| candidate.index)
                 .collect::<Vec<_>>(),
             vec![0, 1, 2, 3, 4]
@@ -601,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_mark_boundary_case_from_candidates_outside_top_5() {
+    fn marks_boundary_case_from_mixed_boundary_neighborhood() {
         let query = [0; VECTOR_DIMENSIONS];
         let records = [
             record(0, false),
@@ -614,7 +616,8 @@ mod tests {
 
         let details = fraud_score_details(&query, &records);
 
-        assert!(!details.boundary_case);
+        assert_eq!(details.score, 0.0);
+        assert!(details.boundary_case);
     }
 
     #[test]

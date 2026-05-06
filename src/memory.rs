@@ -32,6 +32,22 @@ pub struct IndexedReferences {
     ivfs: IvfIndexes,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchCost {
+    pub primary_list_candidates: usize,
+    pub centroid_distance_ops: usize,
+    pub pq_table_ops: usize,
+    pub candidate_pq_code_reads: usize,
+}
+
+impl SearchCost {
+    #[allow(dead_code)]
+    pub fn total_units(&self) -> usize {
+        self.centroid_distance_ops + self.pq_table_ops + self.candidate_pq_code_reads
+    }
+}
+
 pub fn load_references() -> Result<IndexedReferences> {
     let ivfs = IvfIndexes::load()?;
 
@@ -71,6 +87,13 @@ impl ReferenceSource for IndexedReferences {
     {
         self.ivfs
             .for_each_primary_candidates(vector, current_worst_top_distance, visit);
+    }
+}
+
+impl IndexedReferences {
+    #[allow(dead_code)]
+    pub fn search_cost(&self, vector: &ReferenceVector) -> SearchCost {
+        self.ivfs.search_cost(vector)
     }
 }
 
@@ -193,6 +216,11 @@ impl IvfIndexes {
         self.primary
             .for_each_candidates(vector, current_worst_top_distance, visit);
     }
+
+    #[allow(dead_code)]
+    fn search_cost(&self, vector: &ReferenceVector) -> SearchCost {
+        self.primary.search_cost(vector)
+    }
 }
 
 impl IvfIndex {
@@ -241,6 +269,21 @@ impl IvfIndex {
     {
         let centroid = self.nearest_centroid_index(vector);
         self.for_each_candidate_in_centroid(centroid, vector, current_worst_top_distance, visit);
+    }
+
+    #[allow(dead_code)]
+    fn search_cost(&self, vector: &ReferenceVector) -> SearchCost {
+        let centroid = self.nearest_centroid_index(vector);
+        let start = self.candidate_list_boundary_at(centroid) as usize;
+        let end = self.candidate_list_boundary_at(centroid + 1) as usize;
+        let primary_list_candidates = end - start;
+
+        SearchCost {
+            primary_list_candidates,
+            centroid_distance_ops: self.centroid_count * VECTOR_DIMENSIONS,
+            pq_table_ops: PQ_LAYOUT.0 * PQ_CODEWORDS * PQ_LAYOUT.1,
+            candidate_pq_code_reads: primary_list_candidates * PQ_LAYOUT.0,
+        }
     }
 
     fn for_each_candidate_in_centroid<C, V>(
