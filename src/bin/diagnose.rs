@@ -31,6 +31,8 @@ struct TestEntry {
 
 #[derive(Serialize)]
 struct DiagnoseOutput {
+    config: DiagnoseHierarchyConfig,
+    hierarchy_build_elapsed_ms: u128,
     core: DiagnoseCore,
     candidates: DiagnoseCandidates,
     centroids: DiagnoseCentroids,
@@ -50,10 +52,19 @@ struct DiagnoseCandidates {
 
 #[derive(Serialize)]
 struct DiagnoseCentroids {
+    avg_coarse_centroid_candidates: usize,
+    avg_fine_centroid_candidates: usize,
     avg_centroid_candidates: usize,
     avg_centroid_early_discards: usize,
     avg_centroid_full_distance_candidates: usize,
     avg_centroid_vector_dimensions_evaluated: usize,
+}
+
+#[derive(Serialize)]
+struct DiagnoseHierarchyConfig {
+    coarse_centroids: usize,
+    coarse_probes: usize,
+    coarse_iterations: usize,
 }
 
 #[derive(Serialize)]
@@ -79,6 +90,8 @@ fn main() -> Result<()> {
     let mut boundary_decision_mismatches = 0;
     let mut primary_only_decision_mismatches = 0;
     let mut primary_list_candidates = Vec::with_capacity(total);
+    let mut coarse_centroid_candidates = Vec::with_capacity(total);
+    let mut fine_centroid_candidates = Vec::with_capacity(total);
     let mut centroid_candidates = Vec::with_capacity(total);
     let mut centroid_early_discards = Vec::with_capacity(total);
     let mut centroid_full_distance_candidates = Vec::with_capacity(total);
@@ -92,15 +105,17 @@ fn main() -> Result<()> {
     for entry in data.entries {
         let vector = service::vectorization(entry.request);
         let cost = references.search_cost(&vector);
-        primary_list_candidates.push(cost.primary_list_candidates);
-        centroid_candidates.push(cost.centroid_candidates);
-        centroid_early_discards.push(cost.centroid_early_discards);
-        centroid_full_distance_candidates.push(cost.centroid_full_distance_candidates);
-        centroid_vector_dimensions_evaluated.push(cost.centroid_vector_dimensions_evaluated);
-        flat_candidates.push(cost.flat_candidates);
-        flat_early_discards.push(cost.flat_early_discards);
-        flat_full_distance_candidates.push(cost.flat_full_distance_candidates);
-        flat_vector_dimensions_evaluated.push(cost.flat_vector_dimensions_evaluated);
+        primary_list_candidates.push(cost.search.primary_list_candidates);
+        coarse_centroid_candidates.push(cost.coarse_centroid_candidates);
+        fine_centroid_candidates.push(cost.fine_centroid_candidates);
+        centroid_candidates.push(cost.search.centroid_candidates);
+        centroid_early_discards.push(cost.search.centroid_early_discards);
+        centroid_full_distance_candidates.push(cost.search.centroid_full_distance_candidates);
+        centroid_vector_dimensions_evaluated.push(cost.search.centroid_vector_dimensions_evaluated);
+        flat_candidates.push(cost.search.flat_candidates);
+        flat_early_discards.push(cost.search.flat_early_discards);
+        flat_full_distance_candidates.push(cost.search.flat_full_distance_candidates);
+        flat_vector_dimensions_evaluated.push(cost.search.flat_vector_dimensions_evaluated);
         search_cost_units.push(cost.total_units());
 
         let details = service::fraud_score_details(&vector, &references);
@@ -123,10 +138,18 @@ fn main() -> Result<()> {
         }
     }
 
+    let core_elapsed_ms = started.elapsed().as_millis();
+    let hierarchy_config = references.hierarchy_config();
     let output = DiagnoseOutput {
+        config: DiagnoseHierarchyConfig {
+            coarse_centroids: hierarchy_config.coarse_centroids,
+            coarse_probes: hierarchy_config.coarse_probes,
+            coarse_iterations: hierarchy_config.coarse_iterations,
+        },
+        hierarchy_build_elapsed_ms: references.hierarchy_build_elapsed_ms(),
         core: DiagnoseCore {
             entries: total,
-            elapsed_ms: started.elapsed().as_millis(),
+            elapsed_ms: core_elapsed_ms,
             boundary_cases,
             boundary_case_percentage: percentage(boundary_cases, total),
             decision_mismatches,
@@ -143,6 +166,8 @@ fn main() -> Result<()> {
             avg_flat_vector_dimensions_evaluated: average(&flat_vector_dimensions_evaluated),
         },
         centroids: DiagnoseCentroids {
+            avg_coarse_centroid_candidates: average(&coarse_centroid_candidates),
+            avg_fine_centroid_candidates: average(&fine_centroid_candidates),
             avg_centroid_candidates: average(&centroid_candidates),
             avg_centroid_early_discards: average(&centroid_early_discards),
             avg_centroid_full_distance_candidates: average(&centroid_full_distance_candidates),
