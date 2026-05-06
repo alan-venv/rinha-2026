@@ -1,6 +1,5 @@
 ## rust ##
 /target
-/src/bin/diagnose.rs
 
 ## llm ##
 /.agents

@@ -34,7 +34,10 @@ pub struct IndexedReferences {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SearchCost {
     pub primary_list_candidates: usize,
-    pub centroid_distance_ops: usize,
+    pub centroid_candidates: usize,
+    pub centroid_early_discards: usize,
+    pub centroid_full_distance_candidates: usize,
+    pub centroid_vector_dimensions_evaluated: usize,
     pub flat_candidates: usize,
     pub flat_early_discards: usize,
     pub flat_full_distance_candidates: usize,
@@ -44,7 +47,7 @@ pub struct SearchCost {
 impl SearchCost {
     #[allow(dead_code)]
     pub fn total_units(&self) -> usize {
-        self.centroid_distance_ops + self.flat_vector_dimensions_evaluated
+        self.centroid_vector_dimensions_evaluated + self.flat_vector_dimensions_evaluated
     }
 }
 
@@ -162,6 +165,14 @@ struct DistanceEval {
     early_discard: bool,
 }
 
+#[derive(Default)]
+struct CentroidSearchCost {
+    candidates: usize,
+    early_discards: usize,
+    full_distance_candidates: usize,
+    vector_dimensions_evaluated: usize,
+}
+
 struct IvfIndex {
     mmap: Mmap,
     reference_count: usize,
@@ -264,7 +275,8 @@ impl IvfIndex {
 
     #[allow(dead_code)]
     fn search_cost(&self, vector: &ReferenceVector) -> SearchCost {
-        let (centroids, centroid_count) = self.nearest_centroid_indexes(vector);
+        let (centroids, centroid_count, centroid_cost) =
+            self.nearest_centroid_indexes_with_cost(vector);
         let primary_list_candidates = centroids[..centroid_count]
             .iter()
             .map(|centroid| {
@@ -276,7 +288,10 @@ impl IvfIndex {
         let mut nearest = CostTop::new();
         let mut cost = SearchCost {
             primary_list_candidates,
-            centroid_distance_ops: self.centroid_count * VECTOR_DIMENSIONS,
+            centroid_candidates: centroid_cost.candidates,
+            centroid_early_discards: centroid_cost.early_discards,
+            centroid_full_distance_candidates: centroid_cost.full_distance_candidates,
+            centroid_vector_dimensions_evaluated: centroid_cost.vector_dimensions_evaluated,
             ..SearchCost::default()
         };
 
@@ -322,7 +337,9 @@ impl IvfIndex {
             } else {
                 distances[farthest_slot]
             };
-            let distance = self.centroid_distance2_at_limited(centroid, vector, limit);
+            let distance = self
+                .centroid_distance2_at_limited(centroid, vector, limit)
+                .distance;
 
             if len == IVF_INITIAL_PROBES && distance >= distances[farthest_slot] {
                 continue;
@@ -348,13 +365,66 @@ impl IvfIndex {
         (nearest, len)
     }
 
+    #[allow(dead_code)]
+    fn nearest_centroid_indexes_with_cost(
+        &self,
+        vector: &ReferenceVector,
+    ) -> ([usize; IVF_INITIAL_PROBES], usize, CentroidSearchCost) {
+        let mut nearest = [0; IVF_INITIAL_PROBES];
+        let mut distances = [u64::MAX; IVF_INITIAL_PROBES];
+        let mut len = 0;
+        let mut farthest_slot = 0;
+        let mut cost = CentroidSearchCost::default();
+
+        for centroid in 0..self.centroid_count {
+            let limit = if len < IVF_INITIAL_PROBES {
+                u64::MAX
+            } else {
+                distances[farthest_slot]
+            };
+            let evaluation = self.centroid_distance2_at_limited(centroid, vector, limit);
+            let distance = evaluation.distance;
+
+            cost.candidates += 1;
+            cost.vector_dimensions_evaluated += evaluation.dimensions;
+
+            if evaluation.early_discard {
+                cost.early_discards += 1;
+            } else {
+                cost.full_distance_candidates += 1;
+            }
+
+            if len == IVF_INITIAL_PROBES && distance >= distances[farthest_slot] {
+                continue;
+            }
+
+            if len < IVF_INITIAL_PROBES {
+                nearest[len] = centroid;
+                distances[len] = distance;
+
+                if distance > distances[farthest_slot] {
+                    farthest_slot = len;
+                }
+
+                len += 1;
+                continue;
+            }
+
+            nearest[farthest_slot] = centroid;
+            distances[farthest_slot] = distance;
+            farthest_slot = farthest_slot_in(&distances);
+        }
+
+        (nearest, len, cost)
+    }
+
     fn centroid_distance2_at_limited(
         &self,
         centroid: usize,
         vector: &ReferenceVector,
         limit: u64,
-    ) -> u64 {
-        distance2_mmap_at(
+    ) -> DistanceEval {
+        distance2_mmap_at_limited(
             &self.mmap,
             self.centroid_vector_offset(centroid),
             vector,
@@ -399,10 +469,6 @@ impl IvfIndex {
     fn reference_vector_offset(&self, index: usize) -> usize {
         self.vectors_offset + index * VECTOR_LEN
     }
-}
-
-fn distance2_mmap_at(mmap: &Mmap, offset: usize, vector: &ReferenceVector, limit: u64) -> u64 {
-    distance2_mmap_at_limited(mmap, offset, vector, limit).distance
 }
 
 fn distance2_mmap_at_limited(
