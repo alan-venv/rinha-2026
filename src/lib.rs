@@ -14,11 +14,11 @@ pub const IVF_HEADER_LEN: usize = IVF_MAGIC.len()
     + size_of::<u32>()
     + size_of::<u32>();
 
-pub const IVF_ITERATIONS: usize = 20;
-pub const IVF_CENTROIDS: usize = 2048;
-pub const IVF_SAMPLE_MULTIPLIER: usize = 16;
+pub const IVF_ITERATIONS: usize = 30;
+pub const IVF_CENTROIDS: usize = 1024;
+pub const IVF_SAMPLE_MULTIPLIER: usize = 32;
 
-pub const PQ_LAYOUT: (usize, usize) = (2, 7);
-pub const PQ_CODEWORDS: usize = 16;
+pub const PQ_LAYOUT: (usize, usize) = (14, 1);
+pub const PQ_CODEWORDS: usize = 256;
 pub const PQ_SAMPLE_MULTIPLIER: usize = 32;
 pub const PQ_ITERATIONS: usize = 0;
