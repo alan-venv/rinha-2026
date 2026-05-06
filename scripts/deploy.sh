@@ -1,6 +1,6 @@
 #!/bin/bash
 
-TAG="ghcr.io/alan-venv/rinha-service-2026:0.1"
+TAG="ghcr.io/alan-venv/rinha-service-2026:0.2"
 
 docker compose -f docker/docker-compose.yml down
 docker image remove $TAG
