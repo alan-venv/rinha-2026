@@ -19,7 +19,7 @@ services:
           memory: "50MB"
 
   rinha-service-1:
-    image: ghcr.io/alan-venv/rinha-service-2026:1778074565
+    image: ghcr.io/alan-venv/rinha-service-2026:1778090766
     container_name: rinha-service-1
     security_opt:
       - seccomp=unconfined
@@ -36,7 +36,7 @@ services:
           memory: "150MB"
 
   rinha-service-2:
-    image: ghcr.io/alan-venv/rinha-service-2026:1778074565
+    image: ghcr.io/alan-venv/rinha-service-2026:1778090766
     container_name: rinha-service-2
     security_opt:
       - seccomp=unconfined
