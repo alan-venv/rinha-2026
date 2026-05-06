@@ -3,22 +3,15 @@ pub const VECTOR_DIMENSIONS: usize = 14;
 pub const VECTOR_SCALE: f32 = 10_000.0;
 pub const VECTOR_LEN: usize = VECTOR_DIMENSIONS * size_of::<i16>();
 pub type ReferenceVector = [i16; VECTOR_DIMENSIONS];
+pub const NEAREST_COUNT: usize = 5;
 
-// IVF_PQ
-pub const IVF_MAGIC: &[u8; 8] = b"R26IPQ02";
-pub const IVF_HEADER_LEN: usize = IVF_MAGIC.len()
-    + size_of::<u64>()
-    + size_of::<u32>()
-    + size_of::<u64>()
-    + size_of::<u32>()
-    + size_of::<u32>()
-    + size_of::<u32>();
+// IVF_FLAT
+pub const IVF_MAGIC: &[u8; 8] = b"R26IFL03";
+pub const IVF_HEADER_LEN: usize =
+    IVF_MAGIC.len() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>();
 
-pub const IVF_ITERATIONS: usize = 30;
-pub const IVF_CENTROIDS: usize = 2048;
-pub const IVF_SAMPLE_MULTIPLIER: usize = 32;
-
-pub const PQ_LAYOUT: (usize, usize) = (14, 1);
-pub const PQ_CODEWORDS: usize = 256;
-pub const PQ_SAMPLE_MULTIPLIER: usize = 32;
-pub const PQ_ITERATIONS: usize = 0;
+pub const IVF_ITERATIONS: usize = 80;
+pub const IVF_CENTROIDS: usize = 16384;
+pub const IVF_INITIAL_PROBES: usize = 6; // 8 for safe reasons
+pub const IVF_SAMPLE_MULTIPLIER: usize = 64;
+pub const FLAT_EARLY_DIMENSIONS: usize = 5;

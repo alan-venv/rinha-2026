@@ -4,10 +4,9 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::thread;
 
-use rinha::*;
-
 use anyhow::{Result, bail};
 use memmap2::Mmap;
+use rinha::*;
 use serde::Deserialize;
 
 fn main() -> Result<()> {
@@ -77,8 +76,6 @@ impl ReferenceDataset {
     }
 }
 
-type PqSubVector = [i16; PQ_LAYOUT.1];
-
 struct Assignments {
     offsets: Vec<u32>,
     by_position: Vec<u32>,
@@ -97,47 +94,15 @@ impl IndexIvf {
         Self::validate_config(dataset)?;
 
         let workers = Self::worker_count();
-
-        Self::build_primary_index(dataset, workers)
-    }
-
-    fn validate_config(dataset: &ReferenceDataset) -> Result<()> {
-        if PQ_LAYOUT.0 * PQ_LAYOUT.1 != VECTOR_DIMENSIONS {
-            bail!(
-                "invalid PQ layout: {}x{} does not cover {} dimensions",
-                PQ_LAYOUT.0,
-                PQ_LAYOUT.1,
-                VECTOR_DIMENSIONS
-            );
-        }
-
-        if PQ_CODEWORDS > u8::MAX as usize + 1 {
-            bail!("invalid PQ codewords: {} > 256", PQ_CODEWORDS);
-        }
-
-        if IVF_CENTROIDS > dataset.len() {
-            bail!(
-                "invalid centroid count: {} > {}",
-                IVF_CENTROIDS,
-                dataset.len()
-            );
-        }
-
-        Ok(())
-    }
-
-    fn build_primary_index(dataset: &ReferenceDataset, workers: usize) -> Result<()> {
         let sample_count = IVF_SAMPLE_MULTIPLIER * IVF_CENTROIDS;
 
         println!(
-            "building IVF_PQ: references={}, centroids={}, sample={}, pq={}x{}, codewords={}, iterations={}, workers={}",
+            "building IVF_FLAT: references={}, centroids={}, sample={}, iterations={}, probes={}, workers={}",
             dataset.len(),
             IVF_CENTROIDS,
             sample_count,
-            PQ_LAYOUT.0,
-            PQ_LAYOUT.1,
-            PQ_CODEWORDS,
-            PQ_ITERATIONS,
+            IVF_ITERATIONS,
+            IVF_INITIAL_PROBES,
             workers,
         );
 
@@ -149,24 +114,13 @@ impl IndexIvf {
             workers,
         );
         let assignments = Self::assign_references(dataset, &centroids, workers);
-        let codebooks =
-            Self::train_pq_codebooks(dataset, &centroids, &assignments.by_position, workers);
-        let (indices, codes) = Self::encode_candidate_lists(
-            dataset,
-            &centroids,
-            &codebooks,
-            &assignments.offsets,
-            assignments.by_position,
-        );
+        let indices = Self::candidate_indices(&assignments.offsets, assignments.by_position);
         Self::write_index(
             Path::new("resources/ivf.bin"),
-            dataset.len(),
+            dataset,
             &centroids,
-            &codebooks,
             &assignments.offsets,
             &indices,
-            &codes,
-            dataset.fraud_bits(),
         )?;
 
         println!(
@@ -174,12 +128,39 @@ impl IndexIvf {
             "resources/ivf.bin",
             IVF_HEADER_LEN
                 + centroids.len() * VECTOR_LEN
-                + codebooks.len() * PQ_LAYOUT.1 * size_of::<i16>()
                 + assignments.offsets.len() * size_of::<u32>()
                 + indices.len() * size_of::<u32>()
-                + codes.len()
+                + dataset.len() * VECTOR_LEN
                 + dataset.fraud_bits().len()
         );
+
+        Ok(())
+    }
+
+    fn validate_config(dataset: &ReferenceDataset) -> Result<()> {
+        if IVF_CENTROIDS > dataset.len() {
+            bail!(
+                "invalid centroid count: {} > {}",
+                IVF_CENTROIDS,
+                dataset.len()
+            );
+        }
+
+        if FLAT_EARLY_DIMENSIONS == 0 || FLAT_EARLY_DIMENSIONS > VECTOR_DIMENSIONS {
+            bail!(
+                "invalid early dimension count: {} for {} dimensions",
+                FLAT_EARLY_DIMENSIONS,
+                VECTOR_DIMENSIONS
+            );
+        }
+
+        if IVF_INITIAL_PROBES == 0 || IVF_INITIAL_PROBES > IVF_CENTROIDS {
+            bail!(
+                "invalid probe count: {} for {} centroids",
+                IVF_INITIAL_PROBES,
+                IVF_CENTROIDS
+            );
+        }
 
         Ok(())
     }
@@ -368,221 +349,17 @@ impl IndexIvf {
         offsets
     }
 
-    fn encode_candidate_lists(
-        dataset: &ReferenceDataset,
-        centroids: &[ReferenceVector],
-        codebooks: &[PqSubVector],
-        offsets: &[u32],
-        by_position: Vec<u32>,
-    ) -> (Vec<u32>, Vec<u8>) {
+    fn candidate_indices(offsets: &[u32], by_position: Vec<u32>) -> Vec<u32> {
         let mut cursors = offsets[..offsets.len() - 1].to_vec();
-        let entry_count = dataset.len();
-        let mut indices = vec![0_u32; entry_count];
-        let mut codes = vec![0_u8; entry_count * PQ_LAYOUT.0];
+        let mut indices = vec![0_u32; by_position.len()];
 
         for (position, centroid) in by_position.into_iter().enumerate() {
-            let vector = dataset.vector_at(position);
-
             let cursor = &mut cursors[centroid as usize];
-            let entry = *cursor as usize;
-            indices[entry] = position as u32;
-            Self::encode_residual(
-                &vector,
-                &centroids[centroid as usize],
-                codebooks,
-                &mut codes[entry * PQ_LAYOUT.0..(entry + 1) * PQ_LAYOUT.0],
-            );
+            indices[*cursor as usize] = position as u32;
             *cursor += 1;
         }
 
-        (indices, codes)
-    }
-
-    fn train_pq_codebooks(
-        dataset: &ReferenceDataset,
-        centroids: &[ReferenceVector],
-        by_position: &[u32],
-        workers: usize,
-    ) -> Vec<PqSubVector> {
-        let requested = PQ_SAMPLE_MULTIPLIER * PQ_CODEWORDS;
-        let samples =
-            Self::sample_residuals(dataset, centroids, by_position, requested.max(PQ_CODEWORDS));
-        let worker_count = workers.min(PQ_LAYOUT.0).max(1);
-        let subquantizers_per_worker = PQ_LAYOUT.0.div_ceil(worker_count);
-        let codebooks_by_subquantizer = thread::scope(|scope| {
-            let mut tasks = Vec::with_capacity(worker_count);
-
-            for subquantizer_start in (0..PQ_LAYOUT.0).step_by(subquantizers_per_worker) {
-                let samples = &samples;
-                let subquantizer_end =
-                    (subquantizer_start + subquantizers_per_worker).min(PQ_LAYOUT.0);
-
-                tasks.push(scope.spawn(move || {
-                    let mut codebooks = Vec::with_capacity(subquantizer_end - subquantizer_start);
-
-                    for subquantizer in subquantizer_start..subquantizer_end {
-                        println!(
-                            "training PQ subquantizer {}/{} with {} samples",
-                            subquantizer + 1,
-                            PQ_LAYOUT.0,
-                            samples.len()
-                        );
-                        let mut codebook = Self::initial_pq_codebook(samples, subquantizer);
-
-                        for _ in 0..PQ_ITERATIONS {
-                            Self::refine_pq_codebook(samples, subquantizer, &mut codebook);
-                        }
-
-                        codebooks.push((subquantizer, codebook));
-                    }
-
-                    codebooks
-                }));
-            }
-
-            let mut codebooks_by_subquantizer = vec![Vec::new(); PQ_LAYOUT.0];
-
-            for task in tasks {
-                for (subquantizer, codebook) in task.join().expect("worker thread panicked") {
-                    codebooks_by_subquantizer[subquantizer] = codebook;
-                }
-            }
-
-            codebooks_by_subquantizer
-        });
-        let mut codebooks = Vec::with_capacity(PQ_LAYOUT.0 * PQ_CODEWORDS);
-
-        for codebook in codebooks_by_subquantizer {
-            codebooks.extend(codebook);
-        }
-
-        codebooks
-    }
-
-    fn sample_residuals(
-        dataset: &ReferenceDataset,
-        centroids: &[ReferenceVector],
-        by_position: &[u32],
-        requested_count: usize,
-    ) -> Vec<ReferenceVector> {
-        let sample_count = requested_count.min(dataset.len());
-        let mut samples = Vec::with_capacity(sample_count);
-
-        for sample in 0..sample_count {
-            let position = sample * dataset.len() / sample_count;
-            let vector = dataset.vector_at(position);
-            let centroid = &centroids[by_position[position] as usize];
-            samples.push(Self::residual_vector(&vector, centroid));
-        }
-
-        samples
-    }
-
-    fn initial_pq_codebook(samples: &[ReferenceVector], subquantizer: usize) -> Vec<PqSubVector> {
-        let mut codebook = Vec::with_capacity(PQ_CODEWORDS);
-
-        for codeword in 0..PQ_CODEWORDS {
-            let index = codeword * samples.len() / PQ_CODEWORDS;
-            codebook.push(Self::subvector(&samples[index], subquantizer));
-        }
-
-        codebook
-    }
-
-    fn refine_pq_codebook(
-        samples: &[ReferenceVector],
-        subquantizer: usize,
-        codebook: &mut [PqSubVector],
-    ) {
-        let mut sums = vec![[0_i64; PQ_LAYOUT.1]; PQ_CODEWORDS];
-        let mut counts = vec![0_u32; PQ_CODEWORDS];
-
-        for sample in samples {
-            let value = Self::subvector(sample, subquantizer);
-            let codeword = Self::nearest_codeword(codebook, &value);
-            counts[codeword] += 1;
-
-            for dimension in 0..PQ_LAYOUT.1 {
-                sums[codeword][dimension] += i64::from(value[dimension]);
-            }
-        }
-
-        for codeword in 0..PQ_CODEWORDS {
-            let count = counts[codeword];
-
-            if count == 0 {
-                continue;
-            }
-
-            for dimension in 0..PQ_LAYOUT.1 {
-                codebook[codeword][dimension] =
-                    (sums[codeword][dimension] / i64::from(count)) as i16;
-            }
-        }
-    }
-
-    fn encode_residual(
-        vector: &ReferenceVector,
-        centroid: &ReferenceVector,
-        codebooks: &[PqSubVector],
-        output: &mut [u8],
-    ) {
-        let residual = Self::residual_vector(vector, centroid);
-
-        for (subquantizer, byte) in output.iter_mut().enumerate() {
-            let value = Self::subvector(&residual, subquantizer);
-            let start = subquantizer * PQ_CODEWORDS;
-            *byte = Self::nearest_codeword(&codebooks[start..start + PQ_CODEWORDS], &value) as u8;
-        }
-    }
-
-    fn residual_vector(vector: &ReferenceVector, centroid: &ReferenceVector) -> ReferenceVector {
-        let mut residual = [0; VECTOR_DIMENSIONS];
-
-        for dimension in 0..VECTOR_DIMENSIONS {
-            residual[dimension] = vector[dimension].saturating_sub(centroid[dimension]);
-        }
-
-        residual
-    }
-
-    fn subvector(vector: &ReferenceVector, subquantizer: usize) -> PqSubVector {
-        let mut output = [0; PQ_LAYOUT.1];
-        let start = subquantizer * PQ_LAYOUT.1;
-
-        output.copy_from_slice(&vector[start..start + PQ_LAYOUT.1]);
-        output
-    }
-
-    fn nearest_codeword(codebook: &[PqSubVector], value: &PqSubVector) -> usize {
-        let mut nearest = 0;
-        let mut nearest_distance = u64::MAX;
-
-        for (index, codeword) in codebook.iter().enumerate() {
-            let distance = Self::pq_distance2_limited(value, codeword, nearest_distance);
-
-            if distance < nearest_distance {
-                nearest = index;
-                nearest_distance = distance;
-            }
-        }
-
-        nearest
-    }
-
-    fn pq_distance2_limited(a: &PqSubVector, b: &PqSubVector, limit: u64) -> u64 {
-        let mut distance = 0;
-
-        for (left, right) in a.iter().zip(b) {
-            let delta = i64::from(*left) - i64::from(*right);
-            distance += (delta * delta) as u64;
-
-            if distance >= limit {
-                return distance;
-            }
-        }
-
-        distance
+        indices
     }
 
     fn nearest_centroid(centroids: &[ReferenceVector], vector: &ReferenceVector) -> usize {
@@ -618,32 +395,20 @@ impl IndexIvf {
 
     fn write_index(
         output: &Path,
-        reference_count: usize,
+        dataset: &ReferenceDataset,
         centroids: &[ReferenceVector],
-        codebooks: &[PqSubVector],
         offsets: &[u32],
         indices: &[u32],
-        codes: &[u8],
-        fraud_bits: &[u8],
     ) -> Result<()> {
         let output_file = File::create(output)?;
         let mut writer = BufWriter::new(output_file);
         writer.write_all(IVF_MAGIC)?;
-        writer.write_all(&(reference_count as u64).to_le_bytes())?;
+        writer.write_all(&(dataset.len() as u64).to_le_bytes())?;
         writer.write_all(&(centroids.len() as u32).to_le_bytes())?;
         writer.write_all(&(indices.len() as u64).to_le_bytes())?;
-        writer.write_all(&(PQ_LAYOUT.0 as u32).to_le_bytes())?;
-        writer.write_all(&(PQ_CODEWORDS as u32).to_le_bytes())?;
-        writer.write_all(&(PQ_LAYOUT.1 as u32).to_le_bytes())?;
 
         for centroid in centroids {
             for value in centroid {
-                writer.write_all(&value.to_le_bytes())?;
-            }
-        }
-
-        for codeword in codebooks {
-            for value in codeword {
                 writer.write_all(&value.to_le_bytes())?;
             }
         }
@@ -656,8 +421,13 @@ impl IndexIvf {
             writer.write_all(&index.to_le_bytes())?;
         }
 
-        writer.write_all(codes)?;
-        writer.write_all(fraud_bits)?;
+        for vector in &dataset.vectors {
+            for value in vector {
+                writer.write_all(&value.to_le_bytes())?;
+            }
+        }
+
+        writer.write_all(dataset.fraud_bits())?;
         writer.flush()?;
         Ok(())
     }
