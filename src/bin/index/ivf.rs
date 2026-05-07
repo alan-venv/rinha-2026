@@ -1,99 +1,21 @@
-use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::thread;
 
 use anyhow::{Result, bail};
-use memmap2::Mmap;
 use rinha::*;
-use serde::Deserialize;
 
-fn main() -> Result<()> {
-    let dataset = ReferenceDataset::load()?;
-    IndexIvf::build(&dataset)
-}
+use crate::reference::ReferenceDataset;
+use crate::structs::{AssignmentChunk, Assignments};
 
-#[derive(Deserialize)]
-struct ReferenceJson {
-    vector: [f32; VECTOR_DIMENSIONS],
-    label: JsonLabel,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum JsonLabel {
-    Legit,
-    Fraud,
-}
-
-struct ReferenceDataset {
-    vectors: Vec<ReferenceVector>,
-    fraud_bits: Vec<u8>,
-}
-
-impl ReferenceDataset {
-    fn load() -> Result<Self> {
-        let input_file = File::open("resources/references/references.json")?;
-        let mmap = unsafe { Mmap::map(&input_file) }?;
-        let records: Vec<ReferenceJson> = serde_json::from_slice(&mmap)?;
-        let mut vectors = Vec::with_capacity(records.len());
-        let mut fraud_bits = vec![0_u8; records.len().div_ceil(8)];
-
-        for (index, record) in records.iter().enumerate() {
-            vectors.push(Self::quantize_vector(&record.vector));
-            if matches!(record.label, JsonLabel::Fraud) {
-                fraud_bits[index / 8] |= 1 << (index % 8);
-            }
-        }
-
-        Ok(Self {
-            vectors,
-            fraud_bits,
-        })
-    }
-
-    fn len(&self) -> usize {
-        self.vectors.len()
-    }
-
-    fn fraud_bits(&self) -> &[u8] {
-        &self.fraud_bits
-    }
-
-    fn vector_at(&self, index: usize) -> ReferenceVector {
-        self.vectors[index]
-    }
-
-    fn quantize_vector(vector: &[f32; VECTOR_DIMENSIONS]) -> ReferenceVector {
-        let mut quantized = [0; VECTOR_DIMENSIONS];
-
-        for (output, input) in quantized.iter_mut().zip(vector) {
-            *output = (*input * VECTOR_SCALE).round() as i16;
-        }
-
-        quantized
-    }
-}
-
-struct Assignments {
-    offsets: Vec<u32>,
-    by_position: Vec<u32>,
-}
-
-struct AssignmentChunk {
-    start: usize,
-    assignments: Vec<u32>,
-    centroid_counts: Vec<u32>,
-}
-
-struct IndexIvf;
+pub struct IndexIvf;
 
 impl IndexIvf {
-    fn build(dataset: &ReferenceDataset) -> Result<()> {
+    pub fn build(dataset: &ReferenceDataset) -> Result<()> {
         Self::validate_config(dataset)?;
 
-        let workers = Self::worker_count();
+        let workers = thread::available_parallelism().map_or(1, usize::from);
         let sample_count = IVF_SAMPLE_MULTIPLIER * IVF_CENTROIDS;
 
         println!(
@@ -163,14 +85,6 @@ impl IndexIvf {
         }
 
         Ok(())
-    }
-
-    fn worker_count() -> usize {
-        env::var("IVF_THREADS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|&value| value > 0)
-            .unwrap_or_else(|| thread::available_parallelism().map_or(1, usize::from))
     }
 
     fn train_centroids(
