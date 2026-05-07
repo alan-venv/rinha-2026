@@ -68,14 +68,6 @@ impl IndexIvf {
             );
         }
 
-        if FLAT_EARLY_DIMENSIONS == 0 || FLAT_EARLY_DIMENSIONS > VECTOR_DIMENSIONS {
-            bail!(
-                "invalid early dimension count: {} for {} dimensions",
-                FLAT_EARLY_DIMENSIONS,
-                VECTOR_DIMENSIONS
-            );
-        }
-
         if IVF_INITIAL_PROBES == 0 || IVF_INITIAL_PROBES > IVF_CENTROIDS {
             bail!(
                 "invalid probe count: {} for {} centroids",

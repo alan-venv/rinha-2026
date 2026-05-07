@@ -216,27 +216,19 @@ fn distance2_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64) -> u6
 }
 
 fn distance2_vector_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64) -> DistanceEval {
-    let mut distance = 0;
-    let early_dimensions = FLAT_EARLY_DIMENSIONS.min(VECTOR_DIMENSIONS);
-    let mut dimensions = 0;
-
-    for (left, right) in a.iter().zip(b).take(early_dimensions) {
-        let delta = i64::from(*left) - i64::from(*right);
-        distance += (delta * delta) as u64;
-        dimensions += 1;
-    }
+    let mut distance = distance2_first8_vector(a, b);
 
     if distance >= limit {
         return DistanceEval {
             distance,
-            dimensions,
-            early_discard: dimensions < VECTOR_DIMENSIONS,
+            dimensions: SIMD_EARLY_DIMENSIONS,
+            early_discard: true,
         };
     }
 
-    for (left, right) in a.iter().zip(b).skip(early_dimensions) {
-        let delta = i64::from(*left) - i64::from(*right);
-        distance += (delta * delta) as u64;
+    let mut dimensions = SIMD_EARLY_DIMENSIONS;
+    for (left, right) in a.iter().zip(b).skip(SIMD_EARLY_DIMENSIONS) {
+        distance += distance2_scalar_delta(*left, *right);
         dimensions += 1;
 
         if distance >= limit {
@@ -253,6 +245,73 @@ fn distance2_vector_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64
         dimensions,
         early_discard: false,
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn distance2_first8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let left = _mm_loadu_si128(a.as_ptr().cast::<__m128i>());
+        let right = _mm_loadu_si128(b.as_ptr().cast::<__m128i>());
+        distance2_first8_sse2(left, right)
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn distance2_first8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
+    a.iter()
+        .zip(b)
+        .take(SIMD_EARLY_DIMENSIONS)
+        .map(|(left, right)| distance2_scalar_delta(*left, *right))
+        .sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn distance2_first8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let left = _mm_loadu_si128(vector.as_ptr().cast::<__m128i>());
+        let right = _mm_loadu_si128(reference.cast::<__m128i>());
+        distance2_first8_sse2(left, right)
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn distance2_first8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
+    (0..SIMD_EARLY_DIMENSIONS)
+        .map(|dimension| {
+            let reference_value = i16::from_le(unsafe { *reference.add(dimension) });
+            distance2_scalar_delta(vector[dimension], reference_value)
+        })
+        .sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn distance2_first8_sse2(
+    left: std::arch::x86_64::__m128i,
+    right: std::arch::x86_64::__m128i,
+) -> u64 {
+    use std::arch::x86_64::*;
+
+    let delta = unsafe { _mm_sub_epi16(left, right) };
+    let products = unsafe { _mm_madd_epi16(delta, delta) };
+    let mut lanes = [0_i32; 4];
+    unsafe { _mm_storeu_si128(lanes.as_mut_ptr().cast::<__m128i>(), products) };
+
+    lanes.iter().map(|value| *value as u64).sum()
+}
+
+#[inline(always)]
+fn distance2_scalar_delta(left: i16, right: i16) -> u64 {
+    let delta = i64::from(left) - i64::from(right);
+    (delta * delta) as u64
 }
 
 fn initial_sampled_centroids(
@@ -877,29 +936,20 @@ fn distance2_mmap_at_limited(
     limit: u64,
 ) -> DistanceEval {
     let reference = unsafe { mmap.as_ptr().add(offset).cast::<i16>() };
-    let mut distance = 0;
-    let early_dimensions = FLAT_EARLY_DIMENSIONS.min(VECTOR_DIMENSIONS);
-    let mut dimensions = 0;
-
-    for (dimension, query_value) in vector.iter().take(early_dimensions).enumerate() {
-        let reference_value = i16::from_le(unsafe { *reference.add(dimension) });
-        let delta = i64::from(*query_value) - i64::from(reference_value);
-        distance += (delta * delta) as u64;
-        dimensions += 1;
-    }
+    let mut distance = distance2_first8_mmap(reference, vector);
 
     if distance >= limit {
         return DistanceEval {
             distance,
-            dimensions,
-            early_discard: dimensions < VECTOR_DIMENSIONS,
+            dimensions: SIMD_EARLY_DIMENSIONS,
+            early_discard: true,
         };
     }
 
-    for (dimension, query_value) in vector.iter().enumerate().skip(early_dimensions) {
+    let mut dimensions = SIMD_EARLY_DIMENSIONS;
+    for (dimension, query_value) in vector.iter().enumerate().skip(SIMD_EARLY_DIMENSIONS) {
         let reference_value = i16::from_le(unsafe { *reference.add(dimension) });
-        let delta = i64::from(*query_value) - i64::from(reference_value);
-        distance += (delta * delta) as u64;
+        distance += distance2_scalar_delta(*query_value, reference_value);
         dimensions += 1;
 
         if distance >= limit {
