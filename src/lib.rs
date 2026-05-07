@@ -15,6 +15,8 @@ pub const IVF_CENTROIDS: usize = 16384;
 pub const IVF_INITIAL_PROBES: usize = 6; // 8 for safe reasons
 pub const IVF_SAMPLE_MULTIPLIER: usize = 64; // 64 x centroids = 1,048,576 (~1/3 da referencia)
 pub const SIMD_EARLY_DIMENSIONS: usize = 8;
+pub const BOUNDARY_PROBE_BATCH: usize = 6;
+pub const BOUNDARY_MAX_PROBES: usize = 24;
 pub const HIERARCHY_COARSE_CENTROIDS: usize = 512;
 pub const HIERARCHY_COARSE_PROBES: usize = 8;
 pub const HIERARCHY_COARSE_ITERATIONS: usize = 6; // 8 for safe reasons

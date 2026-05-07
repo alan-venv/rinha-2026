@@ -11,6 +11,8 @@ pub struct FraudScoreDetails {
     pub score: f32,
     #[allow(dead_code)]
     pub boundary_case: bool,
+    #[allow(dead_code)]
+    pub probes_used: usize,
 }
 
 #[allow(dead_code)]
@@ -30,6 +32,7 @@ pub fn fraud_score_details(
     FraudScoreDetails {
         score: top_fraud_count as f32 / score_candidates.len() as f32,
         boundary_case: nearest_result.boundary_case,
+        probes_used: nearest_result.probes_used,
     }
 }
 
@@ -61,6 +64,7 @@ struct NearestResult {
     candidates: [NearestCandidate; NEAREST_COUNT],
     len: usize,
     boundary_case: bool,
+    probes_used: usize,
 }
 
 impl NearestResult {
@@ -121,6 +125,7 @@ impl TopNearest {
 
     fn sort_candidates(&mut self) {
         self.candidates[..self.len].sort_unstable_by_key(|candidate| candidate.distance);
+        self.farthest_slot = self.find_farthest_slot();
     }
 
     fn contains(&self, index: usize) -> bool {
@@ -145,23 +150,36 @@ impl TopNearest {
 fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> NearestResult {
     let mut nearest = TopNearest::new();
     let current_worst_distance = Cell::new(u64::MAX);
+    let max_probe_count = records.max_primary_probe_count();
+    let mut start_probe = 0;
+    let mut end_probe = IVF_INITIAL_PROBES.min(max_probe_count);
 
-    records.for_each_primary_candidates(
-        vector,
-        &mut || current_worst_distance.get(),
-        &mut |index, distance| {
-            nearest.add(NearestCandidate { index, distance });
-            current_worst_distance.set(nearest.current_worst_distance());
-        },
-    );
+    loop {
+        records.for_each_primary_candidate_batch(
+            vector,
+            start_probe,
+            end_probe,
+            &mut || current_worst_distance.get(),
+            &mut |index, distance| {
+                nearest.add(NearestCandidate { index, distance });
+                current_worst_distance.set(nearest.current_worst_distance());
+            },
+        );
 
-    nearest.sort_candidates();
-    let boundary_case = is_boundary_case(&nearest.candidates[..nearest.len], records);
+        nearest.sort_candidates();
+        let boundary_case = is_boundary_case(&nearest.candidates[..nearest.len], records);
 
-    NearestResult {
-        candidates: nearest.candidates,
-        len: nearest.len,
-        boundary_case,
+        if !boundary_case || end_probe >= max_probe_count {
+            return NearestResult {
+                candidates: nearest.candidates,
+                len: nearest.len,
+                boundary_case,
+                probes_used: end_probe,
+            };
+        }
+
+        start_probe = end_probe;
+        end_probe = (end_probe + BOUNDARY_PROBE_BATCH).min(max_probe_count);
     }
 }
 
@@ -313,15 +331,21 @@ mod tests {
             self.frauds[index]
         }
 
-        fn for_each_primary_candidates<C, V>(
+        fn for_each_primary_candidate_batch<C, V>(
             &self,
             _vector: &ReferenceVector,
+            start_probe: usize,
+            _end_probe: usize,
             _current_worst_top_distance: &mut C,
             visit: &mut V,
         ) where
             C: FnMut() -> u64,
             V: FnMut(usize, u64),
         {
+            if start_probe > 0 {
+                return;
+            }
+
             for (index, distance) in &self.groups[0] {
                 visit(*index, *distance);
             }

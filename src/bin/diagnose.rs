@@ -65,6 +65,8 @@ struct DiagnoseHierarchyConfig {
     coarse_centroids: usize,
     coarse_probes: usize,
     coarse_iterations: usize,
+    boundary_probe_batch: usize,
+    boundary_max_probes: usize,
 }
 
 #[derive(Serialize)]
@@ -73,6 +75,9 @@ struct DiagnoseCore {
     elapsed_ms: u128,
     boundary_cases: usize,
     boundary_case_percentage: String,
+    boundary_probe_expansions: usize,
+    avg_probes_used: usize,
+    max_probes_used: usize,
     decision_mismatches: usize,
     decision_mismatch_percentage: String,
     boundary_decision_mismatches: usize,
@@ -89,6 +94,8 @@ fn main() -> Result<()> {
     let mut boundary_cases = 0;
     let mut boundary_decision_mismatches = 0;
     let mut primary_only_decision_mismatches = 0;
+    let mut boundary_probe_expansions = 0;
+    let mut probes_used = Vec::with_capacity(total);
     let mut primary_list_candidates = Vec::with_capacity(total);
     let mut coarse_centroid_candidates = Vec::with_capacity(total);
     let mut fine_centroid_candidates = Vec::with_capacity(total);
@@ -104,7 +111,8 @@ fn main() -> Result<()> {
 
     for entry in data.entries {
         let vector = service::vectorization(entry.request);
-        let cost = references.search_cost(&vector);
+        let details = service::fraud_score_details(&vector, &references);
+        let cost = references.search_cost_for_probe_count(&vector, details.probes_used);
         primary_list_candidates.push(cost.search.primary_list_candidates);
         coarse_centroid_candidates.push(cost.coarse_centroid_candidates);
         fine_centroid_candidates.push(cost.fine_centroid_candidates);
@@ -118,9 +126,13 @@ fn main() -> Result<()> {
         flat_vector_dimensions_evaluated.push(cost.search.flat_vector_dimensions_evaluated);
         search_cost_units.push(cost.total_units());
 
-        let details = service::fraud_score_details(&vector, &references);
         let score = details.score;
         let approved = score < 0.6;
+        probes_used.push(details.probes_used);
+
+        if details.probes_used > rinha::IVF_INITIAL_PROBES {
+            boundary_probe_expansions += 1;
+        }
 
         if details.boundary_case {
             boundary_cases += 1;
@@ -145,6 +157,8 @@ fn main() -> Result<()> {
             coarse_centroids: hierarchy_config.coarse_centroids,
             coarse_probes: hierarchy_config.coarse_probes,
             coarse_iterations: hierarchy_config.coarse_iterations,
+            boundary_probe_batch: hierarchy_config.boundary_probe_batch,
+            boundary_max_probes: hierarchy_config.boundary_max_probes,
         },
         hierarchy_build_elapsed_ms: references.hierarchy_build_elapsed_ms(),
         core: DiagnoseCore {
@@ -152,6 +166,9 @@ fn main() -> Result<()> {
             elapsed_ms: core_elapsed_ms,
             boundary_cases,
             boundary_case_percentage: percentage(boundary_cases, total),
+            boundary_probe_expansions,
+            avg_probes_used: average(&probes_used),
+            max_probes_used: probes_used.iter().copied().max().unwrap_or(0),
             decision_mismatches,
             decision_mismatch_percentage: percentage(decision_mismatches, total),
             boundary_decision_mismatches,

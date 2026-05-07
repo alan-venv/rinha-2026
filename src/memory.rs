@@ -18,9 +18,15 @@ pub struct ReferenceRecord {
 pub trait ReferenceSource {
     fn is_fraud(&self, index: usize) -> bool;
 
-    fn for_each_primary_candidates<C, V>(
+    fn max_primary_probe_count(&self) -> usize {
+        IVF_INITIAL_PROBES
+    }
+
+    fn for_each_primary_candidate_batch<C, V>(
         &self,
         vector: &ReferenceVector,
+        start_probe: usize,
+        end_probe: usize,
         current_worst_top_distance: &mut C,
         visit: &mut V,
     ) where
@@ -61,6 +67,8 @@ pub struct HierarchyConfig {
     pub coarse_centroids: usize,
     pub coarse_probes: usize,
     pub coarse_iterations: usize,
+    pub boundary_probe_batch: usize,
+    pub boundary_max_probes: usize,
 }
 
 #[allow(dead_code)]
@@ -115,18 +123,26 @@ impl ReferenceSource for IndexedReferences {
         self.ivfs.is_fraud(index)
     }
 
-    fn for_each_primary_candidates<C, V>(
+    fn max_primary_probe_count(&self) -> usize {
+        BOUNDARY_MAX_PROBES
+    }
+
+    fn for_each_primary_candidate_batch<C, V>(
         &self,
         vector: &ReferenceVector,
+        start_probe: usize,
+        end_probe: usize,
         current_worst_top_distance: &mut C,
         visit: &mut V,
     ) where
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
-        self.ivfs.primary.for_each_hierarchy_candidates(
+        self.ivfs.primary.for_each_hierarchy_candidate_batch(
             &self.hierarchy,
             vector,
+            start_probe,
+            end_probe,
             current_worst_top_distance,
             visit,
         );
@@ -136,9 +152,18 @@ impl ReferenceSource for IndexedReferences {
 impl IndexedReferences {
     #[allow(dead_code)]
     pub fn search_cost(&self, vector: &ReferenceVector) -> HierarchySearchCost {
+        self.search_cost_for_probe_count(vector, IVF_INITIAL_PROBES)
+    }
+
+    #[allow(dead_code)]
+    pub fn search_cost_for_probe_count(
+        &self,
+        vector: &ReferenceVector,
+        probe_count: usize,
+    ) -> HierarchySearchCost {
         self.ivfs
             .primary
-            .hierarchy_search_cost(&self.hierarchy, vector)
+            .hierarchy_search_cost(&self.hierarchy, vector, probe_count)
     }
 
     #[allow(dead_code)]
@@ -147,6 +172,8 @@ impl IndexedReferences {
             coarse_centroids: HIERARCHY_COARSE_CENTROIDS,
             coarse_probes: HIERARCHY_COARSE_PROBES,
             coarse_iterations: HIERARCHY_COARSE_ITERATIONS,
+            boundary_probe_batch: BOUNDARY_PROBE_BATCH,
+            boundary_max_probes: BOUNDARY_MAX_PROBES,
         }
     }
 
@@ -161,15 +188,21 @@ impl ReferenceSource for [ReferenceRecord] {
         self[index].is_fraud
     }
 
-    fn for_each_primary_candidates<C, V>(
+    fn for_each_primary_candidate_batch<C, V>(
         &self,
         vector: &ReferenceVector,
+        start_probe: usize,
+        _end_probe: usize,
         current_worst_top_distance: &mut C,
         visit: &mut V,
     ) where
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
+        if start_probe > 0 {
+            return;
+        }
+
         for index in 0..self.len() {
             let max_useful_distance = current_worst_top_distance();
             let distance = distance2_limited(vector, &self[index].vector, max_useful_distance);
@@ -186,17 +219,24 @@ impl<const N: usize> ReferenceSource for [ReferenceRecord; N] {
         self[index].is_fraud
     }
 
-    fn for_each_primary_candidates<C, V>(
+    fn for_each_primary_candidate_batch<C, V>(
         &self,
         vector: &ReferenceVector,
+        start_probe: usize,
+        end_probe: usize,
         current_worst_top_distance: &mut C,
         visit: &mut V,
     ) where
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
-        self.as_slice()
-            .for_each_primary_candidates(vector, current_worst_top_distance, visit);
+        self.as_slice().for_each_primary_candidate_batch(
+            vector,
+            start_probe,
+            end_probe,
+            current_worst_top_distance,
+            visit,
+        );
     }
 }
 
@@ -363,8 +403,8 @@ struct CentroidSearchCost {
     vector_dimensions_evaluated: usize,
 }
 
-struct SelectedCentroids {
-    centroids: [usize; IVF_INITIAL_PROBES],
+struct SelectedCentroids<const N: usize> {
+    centroids: [usize; N],
     len: usize,
     cost: CentroidSearchCost,
     coarse_centroid_candidates: usize,
@@ -421,6 +461,23 @@ impl<const N: usize> TopCentroids<N> {
     fn indexes(&self) -> &[usize] {
         &self.indexes[..self.len]
     }
+
+    fn sort_indexes(&mut self) {
+        let indexes = &mut self.indexes;
+        let distances = &mut self.distances;
+
+        for index in 1..self.len {
+            let mut current = index;
+
+            while current > 0 && distances[current] < distances[current - 1] {
+                distances.swap(current, current - 1);
+                indexes.swap(current, current - 1);
+                current -= 1;
+            }
+        }
+
+        self.farthest_slot = self.len.saturating_sub(1);
+    }
 }
 
 struct IvfIndex {
@@ -439,9 +496,13 @@ struct IvfIndexes {
 }
 
 impl CentroidHierarchy {
-    fn select_centroids(&self, index: &IvfIndex, vector: &ReferenceVector) -> SelectedCentroids {
+    fn select_centroids<const N: usize>(
+        &self,
+        index: &IvfIndex,
+        vector: &ReferenceVector,
+    ) -> SelectedCentroids<N> {
         let mut coarse_nearest = TopCentroids::<HIERARCHY_COARSE_PROBES>::new();
-        let mut fine_nearest = TopCentroids::<IVF_INITIAL_PROBES>::new();
+        let mut fine_nearest = TopCentroids::<N>::new();
         let mut cost = CentroidSearchCost::default();
         let mut coarse_centroid_candidates = 0;
         let mut fine_centroid_candidates = 0;
@@ -489,6 +550,8 @@ impl CentroidHierarchy {
                 }
             }
         }
+
+        fine_nearest.sort_indexes();
 
         SelectedCentroids {
             centroids: fine_nearest.indexes,
@@ -577,20 +640,89 @@ impl IvfIndex {
         );
     }
 
-    fn for_each_hierarchy_candidates<C, V>(
+    fn for_each_hierarchy_candidate_batch<C, V>(
         &self,
         hierarchy: &CentroidHierarchy,
         vector: &ReferenceVector,
+        start_probe: usize,
+        end_probe: usize,
         current_worst_top_distance: &mut C,
         visit: &mut V,
     ) where
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
-        let selection = hierarchy.select_centroids(self, vector);
+        let end_probe = end_probe.min(BOUNDARY_MAX_PROBES);
+
+        if end_probe <= IVF_INITIAL_PROBES {
+            self.for_each_selected_hierarchy_candidate_batch::<IVF_INITIAL_PROBES, _, _>(
+                hierarchy,
+                vector,
+                start_probe,
+                end_probe,
+                current_worst_top_distance,
+                visit,
+            );
+        } else if end_probe <= { IVF_INITIAL_PROBES + BOUNDARY_PROBE_BATCH } {
+            self.for_each_selected_hierarchy_candidate_batch::<
+                { IVF_INITIAL_PROBES + BOUNDARY_PROBE_BATCH },
+                _,
+                _,
+            >(
+                hierarchy,
+                vector,
+                start_probe,
+                end_probe,
+                current_worst_top_distance,
+                visit,
+            );
+        } else if end_probe <= { IVF_INITIAL_PROBES + BOUNDARY_PROBE_BATCH * 2 } {
+            self.for_each_selected_hierarchy_candidate_batch::<
+                { IVF_INITIAL_PROBES + BOUNDARY_PROBE_BATCH * 2 },
+                _,
+                _,
+            >(
+                hierarchy,
+                vector,
+                start_probe,
+                end_probe,
+                current_worst_top_distance,
+                visit,
+            );
+        } else {
+            self.for_each_selected_hierarchy_candidate_batch::<BOUNDARY_MAX_PROBES, _, _>(
+                hierarchy,
+                vector,
+                start_probe,
+                end_probe,
+                current_worst_top_distance,
+                visit,
+            );
+        }
+    }
+
+    fn for_each_selected_hierarchy_candidate_batch<const N: usize, C, V>(
+        &self,
+        hierarchy: &CentroidHierarchy,
+        vector: &ReferenceVector,
+        start_probe: usize,
+        end_probe: usize,
+        current_worst_top_distance: &mut C,
+        visit: &mut V,
+    ) where
+        C: FnMut() -> u64,
+        V: FnMut(usize, u64),
+    {
+        let selection = hierarchy.select_centroids::<N>(self, vector);
+        let start = start_probe.min(selection.len);
+        let end = end_probe.min(selection.len);
+
+        if start >= end {
+            return;
+        }
 
         self.for_each_candidates_from_centroids(
-            &selection.centroids[..selection.len],
+            &selection.centroids[start..end],
             vector,
             current_worst_top_distance,
             visit,
@@ -644,10 +776,50 @@ impl IvfIndex {
         &self,
         hierarchy: &CentroidHierarchy,
         vector: &ReferenceVector,
+        probe_count: usize,
     ) -> HierarchySearchCost {
-        let selection = hierarchy.select_centroids(self, vector);
+        let probe_count = probe_count.min(BOUNDARY_MAX_PROBES);
+
+        if probe_count <= IVF_INITIAL_PROBES {
+            return self.hierarchy_search_cost_for::<IVF_INITIAL_PROBES>(
+                hierarchy,
+                vector,
+                probe_count,
+            );
+        }
+
+        if probe_count <= { IVF_INITIAL_PROBES + BOUNDARY_PROBE_BATCH } {
+            return self
+                .hierarchy_search_cost_for::<{ IVF_INITIAL_PROBES + BOUNDARY_PROBE_BATCH }>(
+                    hierarchy,
+                    vector,
+                    probe_count,
+                );
+        }
+
+        if probe_count <= { IVF_INITIAL_PROBES + BOUNDARY_PROBE_BATCH * 2 } {
+            return self
+                .hierarchy_search_cost_for::<{ IVF_INITIAL_PROBES + BOUNDARY_PROBE_BATCH * 2 }>(
+                    hierarchy,
+                    vector,
+                    probe_count,
+                );
+        }
+
+        self.hierarchy_search_cost_for::<BOUNDARY_MAX_PROBES>(hierarchy, vector, probe_count)
+    }
+
+    #[allow(dead_code)]
+    fn hierarchy_search_cost_for<const N: usize>(
+        &self,
+        hierarchy: &CentroidHierarchy,
+        vector: &ReferenceVector,
+        probe_count: usize,
+    ) -> HierarchySearchCost {
+        let selection = hierarchy.select_centroids::<N>(self, vector);
+        let selected_len = probe_count.min(selection.len);
         let mut search =
-            self.search_cost_from_centroids(&selection.centroids[..selection.len], vector);
+            self.search_cost_from_centroids(&selection.centroids[..selected_len], vector);
 
         search.centroid_candidates = selection.cost.candidates;
         search.centroid_early_discards = selection.cost.early_discards;
