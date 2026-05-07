@@ -13,6 +13,8 @@ pub struct FraudScoreDetails {
     pub boundary_case: bool,
     #[allow(dead_code)]
     pub probes_used: usize,
+    #[allow(dead_code)]
+    pub fallback_used: bool,
 }
 
 #[allow(dead_code)]
@@ -33,6 +35,7 @@ pub fn fraud_score_details(
         score: top_fraud_count as f32 / score_candidates.len() as f32,
         boundary_case: nearest_result.boundary_case,
         probes_used: nearest_result.probes_used,
+        fallback_used: nearest_result.fallback_used,
     }
 }
 
@@ -65,6 +68,7 @@ struct NearestResult {
     len: usize,
     boundary_case: bool,
     probes_used: usize,
+    fallback_used: bool,
 }
 
 impl NearestResult {
@@ -150,36 +154,63 @@ impl TopNearest {
 fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> NearestResult {
     let mut nearest = TopNearest::new();
     let current_worst_distance = Cell::new(u64::MAX);
-    let max_probe_count = records.max_primary_probe_count();
-    let mut start_probe = 0;
-    let mut end_probe = IVF_INITIAL_PROBES.min(max_probe_count);
+    records.for_each_primary_candidate_batch(
+        vector,
+        0,
+        IVF_INITIAL_PROBES,
+        &mut || current_worst_distance.get(),
+        &mut |index, distance| {
+            nearest.add(NearestCandidate { index, distance });
+            current_worst_distance.set(nearest.current_worst_distance());
+        },
+    );
 
-    loop {
-        records.for_each_primary_candidate_batch(
-            vector,
-            start_probe,
-            end_probe,
-            &mut || current_worst_distance.get(),
-            &mut |index, distance| {
-                nearest.add(NearestCandidate { index, distance });
-                current_worst_distance.set(nearest.current_worst_distance());
-            },
+    nearest.sort_candidates();
+    let boundary_case = is_boundary_case(&nearest.candidates[..nearest.len], records);
+
+    if !boundary_case {
+        return NearestResult {
+            candidates: nearest.candidates,
+            len: nearest.len,
+            boundary_case,
+            probes_used: IVF_INITIAL_PROBES,
+            fallback_used: false,
+        };
+    }
+
+    let mut fallback_nearest = TopNearest::new();
+    let fallback_current_worst_distance = Cell::new(u64::MAX);
+    let fallback_used = records.for_each_boundary_fallback_candidate(
+        vector,
+        &mut || fallback_current_worst_distance.get(),
+        &mut |index, distance| {
+            fallback_nearest.add(NearestCandidate { index, distance });
+            fallback_current_worst_distance.set(fallback_nearest.current_worst_distance());
+        },
+    );
+
+    if fallback_used {
+        fallback_nearest.sort_candidates();
+        let boundary_case = is_boundary_case(
+            &fallback_nearest.candidates[..fallback_nearest.len],
+            records,
         );
 
-        nearest.sort_candidates();
-        let boundary_case = is_boundary_case(&nearest.candidates[..nearest.len], records);
+        return NearestResult {
+            candidates: fallback_nearest.candidates,
+            len: fallback_nearest.len,
+            boundary_case,
+            probes_used: BOUNDARY_FULL_SCAN_FINE_PROBES,
+            fallback_used: true,
+        };
+    }
 
-        if !boundary_case || end_probe >= max_probe_count {
-            return NearestResult {
-                candidates: nearest.candidates,
-                len: nearest.len,
-                boundary_case,
-                probes_used: end_probe,
-            };
-        }
-
-        start_probe = end_probe;
-        end_probe = (end_probe + BOUNDARY_PROBE_BATCH).min(max_probe_count);
+    NearestResult {
+        candidates: nearest.candidates,
+        len: nearest.len,
+        boundary_case,
+        probes_used: IVF_INITIAL_PROBES,
+        fallback_used: false,
     }
 }
 

@@ -32,10 +32,33 @@ struct TestEntry {
 #[derive(Serialize)]
 struct DiagnoseOutput {
     config: DiagnoseHierarchyConfig,
-    hierarchy_build_elapsed_ms: u128,
     core: DiagnoseCore,
     candidates: DiagnoseCandidates,
     centroids: DiagnoseCentroids,
+}
+
+#[derive(Serialize)]
+struct DiagnoseHierarchyConfig {
+    coarse_centroids: usize,
+    coarse_probes: usize,
+    coarse_iterations: usize,
+    boundary_full_scan_fine_probes: usize,
+}
+
+#[derive(Serialize)]
+struct DiagnoseCore {
+    entries: usize,
+    elapsed_ms: u128,
+    hierarchy_build_elapsed_ms: u128,
+    boundary_cases: usize,
+    boundary_case_percentage: String,
+    boundary_full_centroid_fallbacks: usize,
+    avg_probes_used: usize,
+    max_probes_used: usize,
+    decision_mismatches: usize,
+    decision_mismatch_percentage: String,
+    boundary_decision_mismatches: usize,
+    primary_only_decision_mismatches: usize,
     avg_search_cost_units: usize,
     max_search_cost_units: usize,
 }
@@ -60,30 +83,6 @@ struct DiagnoseCentroids {
     avg_centroid_vector_dimensions_evaluated: usize,
 }
 
-#[derive(Serialize)]
-struct DiagnoseHierarchyConfig {
-    coarse_centroids: usize,
-    coarse_probes: usize,
-    coarse_iterations: usize,
-    boundary_probe_batch: usize,
-    boundary_max_probes: usize,
-}
-
-#[derive(Serialize)]
-struct DiagnoseCore {
-    entries: usize,
-    elapsed_ms: u128,
-    boundary_cases: usize,
-    boundary_case_percentage: String,
-    boundary_probe_expansions: usize,
-    avg_probes_used: usize,
-    max_probes_used: usize,
-    decision_mismatches: usize,
-    decision_mismatch_percentage: String,
-    boundary_decision_mismatches: usize,
-    primary_only_decision_mismatches: usize,
-}
-
 fn main() -> Result<()> {
     let started = Instant::now();
     let references = memory::load_references()?;
@@ -94,7 +93,7 @@ fn main() -> Result<()> {
     let mut boundary_cases = 0;
     let mut boundary_decision_mismatches = 0;
     let mut primary_only_decision_mismatches = 0;
-    let mut boundary_probe_expansions = 0;
+    let mut boundary_full_centroid_fallbacks = 0;
     let mut probes_used = Vec::with_capacity(total);
     let mut primary_list_candidates = Vec::with_capacity(total);
     let mut coarse_centroid_candidates = Vec::with_capacity(total);
@@ -112,26 +111,45 @@ fn main() -> Result<()> {
     for entry in data.entries {
         let vector = service::vectorization(entry.request);
         let details = service::fraud_score_details(&vector, &references);
-        let cost = references.search_cost_for_probe_count(&vector, details.probes_used);
-        primary_list_candidates.push(cost.search.primary_list_candidates);
-        coarse_centroid_candidates.push(cost.coarse_centroid_candidates);
-        fine_centroid_candidates.push(cost.fine_centroid_candidates);
-        centroid_candidates.push(cost.search.centroid_candidates);
-        centroid_early_discards.push(cost.search.centroid_early_discards);
-        centroid_full_distance_candidates.push(cost.search.centroid_full_distance_candidates);
-        centroid_vector_dimensions_evaluated.push(cost.search.centroid_vector_dimensions_evaluated);
-        flat_candidates.push(cost.search.flat_candidates);
-        flat_early_discards.push(cost.search.flat_early_discards);
-        flat_full_distance_candidates.push(cost.search.flat_full_distance_candidates);
-        flat_vector_dimensions_evaluated.push(cost.search.flat_vector_dimensions_evaluated);
-        search_cost_units.push(cost.total_units());
+        let (cost, coarse_candidates, fine_candidates, total_units) = if details.fallback_used {
+            let fallback = references
+                .full_centroid_fallback_search_cost::<{ rinha::BOUNDARY_FULL_SCAN_FINE_PROBES }>(
+                    &vector,
+                );
+            (
+                fallback.search,
+                fallback.coarse_centroid_candidates,
+                fallback.fine_centroid_candidates,
+                fallback.total_units(),
+            )
+        } else {
+            let primary = references.search_cost_for_probe_count(&vector, details.probes_used);
+            (
+                primary.search,
+                primary.coarse_centroid_candidates,
+                primary.fine_centroid_candidates,
+                primary.total_units(),
+            )
+        };
 
-        let score = details.score;
-        let approved = score < 0.6;
+        primary_list_candidates.push(cost.primary_list_candidates);
+        coarse_centroid_candidates.push(coarse_candidates);
+        fine_centroid_candidates.push(fine_candidates);
+        centroid_candidates.push(cost.centroid_candidates);
+        centroid_early_discards.push(cost.centroid_early_discards);
+        centroid_full_distance_candidates.push(cost.centroid_full_distance_candidates);
+        centroid_vector_dimensions_evaluated.push(cost.centroid_vector_dimensions_evaluated);
+        flat_candidates.push(cost.flat_candidates);
+        flat_early_discards.push(cost.flat_early_discards);
+        flat_full_distance_candidates.push(cost.flat_full_distance_candidates);
+        flat_vector_dimensions_evaluated.push(cost.flat_vector_dimensions_evaluated);
+        search_cost_units.push(total_units);
+
+        let approved = details.score < 0.6;
         probes_used.push(details.probes_used);
 
-        if details.probes_used > rinha::IVF_INITIAL_PROBES {
-            boundary_probe_expansions += 1;
+        if details.fallback_used {
+            boundary_full_centroid_fallbacks += 1;
         }
 
         if details.boundary_case {
@@ -150,29 +168,29 @@ fn main() -> Result<()> {
         }
     }
 
-    let core_elapsed_ms = started.elapsed().as_millis();
     let hierarchy_config = references.hierarchy_config();
     let output = DiagnoseOutput {
         config: DiagnoseHierarchyConfig {
             coarse_centroids: hierarchy_config.coarse_centroids,
             coarse_probes: hierarchy_config.coarse_probes,
             coarse_iterations: hierarchy_config.coarse_iterations,
-            boundary_probe_batch: hierarchy_config.boundary_probe_batch,
-            boundary_max_probes: hierarchy_config.boundary_max_probes,
+            boundary_full_scan_fine_probes: hierarchy_config.boundary_full_scan_fine_probes,
         },
-        hierarchy_build_elapsed_ms: references.hierarchy_build_elapsed_ms(),
         core: DiagnoseCore {
             entries: total,
-            elapsed_ms: core_elapsed_ms,
+            elapsed_ms: started.elapsed().as_millis(),
+            hierarchy_build_elapsed_ms: references.hierarchy_build_elapsed_ms(),
             boundary_cases,
             boundary_case_percentage: percentage(boundary_cases, total),
-            boundary_probe_expansions,
+            boundary_full_centroid_fallbacks,
             avg_probes_used: average(&probes_used),
             max_probes_used: probes_used.iter().copied().max().unwrap_or(0),
             decision_mismatches,
             decision_mismatch_percentage: percentage(decision_mismatches, total),
             boundary_decision_mismatches,
             primary_only_decision_mismatches,
+            avg_search_cost_units: average(&search_cost_units),
+            max_search_cost_units: search_cost_units.iter().copied().max().unwrap_or(0),
         },
         candidates: DiagnoseCandidates {
             avg_primary_list_candidates: average(&primary_list_candidates),
@@ -192,8 +210,6 @@ fn main() -> Result<()> {
                 &centroid_vector_dimensions_evaluated,
             ),
         },
-        avg_search_cost_units: average(&search_cost_units),
-        max_search_cost_units: search_cost_units.iter().copied().max().unwrap_or(0),
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
