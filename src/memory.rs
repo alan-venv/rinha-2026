@@ -1,5 +1,6 @@
 use std::env;
 use std::fs::File;
+use std::ops::Range;
 use std::path::Path;
 use std::time::Instant;
 
@@ -214,8 +215,7 @@ impl ReferenceSource for IndexedReferences {
             &self.hierarchy,
             context,
             vector,
-            start_probe,
-            end_probe,
+            start_probe..end_probe,
             current_worst_top_distance,
             visit,
         );
@@ -321,16 +321,6 @@ impl IndexedReferences {
     }
 
     #[allow(dead_code)]
-    pub fn full_centroid_fallback_search_cost<const FINE_PROBES: usize>(
-        &self,
-        vector: &ReferenceVector,
-    ) -> HierarchySearchCost {
-        self.ivfs
-            .primary
-            .full_centroid_search_cost_for::<FINE_PROBES>(vector)
-    }
-
-    #[allow(dead_code)]
     pub fn boundary_fallback_search_cost(&self, vector: &ReferenceVector) -> HierarchySearchCost {
         let context = self.prepare_search_context(vector);
         self.boundary_fallback_search_cost_with_context(&context, vector)
@@ -397,9 +387,9 @@ impl ReferenceSource for [ReferenceRecord] {
             return;
         }
 
-        for index in 0..self.len() {
+        for (index, record) in self.iter().enumerate() {
             let max_useful_distance = current_worst_top_distance();
-            let distance = distance2_limited(vector, &self[index].vector, max_useful_distance);
+            let distance = distance2_limited(vector, &record.vector, max_useful_distance);
 
             if is_candidate_distance_useful(distance, max_useful_distance) {
                 visit(index, distance);
@@ -599,6 +589,28 @@ struct CentroidSearchCost {
     vector_dimensions_evaluated: usize,
 }
 
+#[derive(Clone, Copy)]
+enum CentroidCostMode {
+    IncludeCoarse,
+    FineOnly,
+}
+
+impl CentroidCostMode {
+    fn initial_cost(self, context: &SearchContext) -> CentroidSearchCost {
+        match self {
+            Self::IncludeCoarse => context.coarse_cost,
+            Self::FineOnly => CentroidSearchCost::default(),
+        }
+    }
+
+    fn coarse_centroid_candidates(self, context: &SearchContext) -> usize {
+        match self {
+            Self::IncludeCoarse => context.coarse_centroid_candidates,
+            Self::FineOnly => 0,
+        }
+    }
+}
+
 struct CoarseSelection<const N: usize> {
     indexes: [usize; N],
     len: usize,
@@ -747,19 +759,11 @@ impl CentroidHierarchy {
         vector: &ReferenceVector,
         context: &SearchContext,
         coarse_limit: usize,
-        include_coarse_cost: bool,
+        cost_mode: CentroidCostMode,
     ) -> SelectedCentroids<FINE_PROBES> {
         let mut fine_nearest = TopCentroids::<FINE_PROBES>::new();
-        let mut cost = if include_coarse_cost {
-            context.coarse_cost
-        } else {
-            CentroidSearchCost::default()
-        };
-        let coarse_centroid_candidates = if include_coarse_cost {
-            context.coarse_centroid_candidates
-        } else {
-            0
-        };
+        let mut cost = cost_mode.initial_cost(context);
+        let coarse_centroid_candidates = cost_mode.coarse_centroid_candidates(context);
         let mut fine_centroid_candidates = 0;
 
         for coarse in context.coarse_indexes(coarse_limit).iter().copied() {
@@ -802,7 +806,7 @@ impl CentroidHierarchy {
         &self,
         context: &SearchContext,
         coarse_limit: usize,
-        include_coarse_cost: bool,
+        cost_mode: CentroidCostMode,
     ) -> SelectedCentroidGroups {
         let mut centroids = Vec::new();
         for coarse in context.coarse_indexes(coarse_limit).iter().copied() {
@@ -817,16 +821,8 @@ impl CentroidHierarchy {
 
         SelectedCentroidGroups {
             centroids,
-            cost: if include_coarse_cost {
-                context.coarse_cost
-            } else {
-                CentroidSearchCost::default()
-            },
-            coarse_centroid_candidates: if include_coarse_cost {
-                context.coarse_centroid_candidates
-            } else {
-                0
-            },
+            cost: cost_mode.initial_cost(context),
+            coarse_centroid_candidates: cost_mode.coarse_centroid_candidates(context),
         }
     }
 }
@@ -841,6 +837,13 @@ impl IvfIndexes {
     fn is_fraud(&self, index: usize) -> bool {
         self.primary.is_fraud(index)
     }
+}
+
+fn apply_centroid_search_cost(search: &mut SearchCost, cost: CentroidSearchCost) {
+    search.centroid_candidates = cost.candidates;
+    search.centroid_early_discards = cost.early_discards;
+    search.centroid_full_distance_candidates = cost.full_distance_candidates;
+    search.centroid_vector_dimensions_evaluated = cost.vector_dimensions_evaluated;
 }
 
 impl IvfIndex {
@@ -874,8 +877,7 @@ impl IvfIndex {
         hierarchy: &CentroidHierarchy,
         context: &SearchContext,
         vector: &ReferenceVector,
-        start_probe: usize,
-        end_probe: usize,
+        probe_range: Range<usize>,
         current_worst_top_distance: &mut C,
         visit: &mut V,
     ) where
@@ -886,29 +888,7 @@ impl IvfIndex {
             hierarchy,
             context,
             vector,
-            start_probe,
-            end_probe,
-            current_worst_top_distance,
-            visit,
-        );
-    }
-
-    #[allow(dead_code)]
-    fn for_each_full_centroid_fallback_candidate<const N: usize, C, V>(
-        &self,
-        vector: &ReferenceVector,
-        current_worst_top_distance: &mut C,
-        visit: &mut V,
-    ) where
-        C: FnMut() -> u64,
-        V: FnMut(usize, u64),
-    {
-        let (centroids, centroid_count, _) =
-            self.nearest_centroid_indexes_with_cost_for::<N>(vector);
-
-        self.for_each_candidates_from_centroids(
-            &centroids[..centroid_count],
-            vector,
+            probe_range,
             current_worst_top_distance,
             visit,
         );
@@ -935,7 +915,7 @@ impl IvfIndex {
             vector,
             context,
             COARSE_PROBES,
-            false,
+            CentroidCostMode::FineOnly,
         );
 
         self.for_each_candidates_from_centroids(
@@ -957,8 +937,11 @@ impl IvfIndex {
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
-        let selection =
-            hierarchy.select_fine_centroids_from_context_coarse(context, COARSE_PROBES, false);
+        let selection = hierarchy.select_fine_centroids_from_context_coarse(
+            context,
+            COARSE_PROBES,
+            CentroidCostMode::FineOnly,
+        );
 
         self.for_each_candidates_from_centroids(
             &selection.centroids,
@@ -973,8 +956,7 @@ impl IvfIndex {
         hierarchy: &CentroidHierarchy,
         context: &SearchContext,
         vector: &ReferenceVector,
-        start_probe: usize,
-        end_probe: usize,
+        probe_range: Range<usize>,
         current_worst_top_distance: &mut C,
         visit: &mut V,
     ) where
@@ -986,10 +968,10 @@ impl IvfIndex {
             vector,
             context,
             HIERARCHY_COARSE_PROBES,
-            false,
+            CentroidCostMode::FineOnly,
         );
-        let start = start_probe.min(selection.len);
-        let end = end_probe.min(selection.len);
+        let start = probe_range.start.min(selection.len);
+        let end = probe_range.end.min(selection.len);
 
         if start >= end {
             return;
@@ -1060,22 +1042,10 @@ impl IvfIndex {
             vector,
             context,
             HIERARCHY_COARSE_PROBES,
-            true,
+            CentroidCostMode::IncludeCoarse,
         );
         let selected_len = probe_count.min(selection.len);
-        let mut search =
-            self.search_cost_from_centroids(&selection.centroids[..selected_len], vector);
-
-        search.centroid_candidates = selection.cost.candidates;
-        search.centroid_early_discards = selection.cost.early_discards;
-        search.centroid_full_distance_candidates = selection.cost.full_distance_candidates;
-        search.centroid_vector_dimensions_evaluated = selection.cost.vector_dimensions_evaluated;
-
-        HierarchySearchCost {
-            search,
-            coarse_centroid_candidates: selection.coarse_centroid_candidates,
-            fine_centroid_candidates: selection.fine_centroid_candidates,
-        }
+        self.search_cost_from_selected_centroids(&selection, selected_len, vector)
     }
 
     #[allow(dead_code)]
@@ -1126,23 +1096,20 @@ impl IvfIndex {
     }
 
     #[allow(dead_code)]
-    fn full_centroid_search_cost_for<const N: usize>(
+    fn search_cost_from_selected_centroids<const N: usize>(
         &self,
+        selection: &SelectedCentroids<N>,
+        selected_len: usize,
         vector: &ReferenceVector,
     ) -> HierarchySearchCost {
-        let (centroids, centroid_count, centroid_cost) =
-            self.nearest_centroid_indexes_with_cost_for::<N>(vector);
-        let mut search = self.search_cost_from_centroids(&centroids[..centroid_count], vector);
-
-        search.centroid_candidates = centroid_cost.candidates;
-        search.centroid_early_discards = centroid_cost.early_discards;
-        search.centroid_full_distance_candidates = centroid_cost.full_distance_candidates;
-        search.centroid_vector_dimensions_evaluated = centroid_cost.vector_dimensions_evaluated;
+        let mut search =
+            self.search_cost_from_centroids(&selection.centroids[..selected_len], vector);
+        apply_centroid_search_cost(&mut search, selection.cost);
 
         HierarchySearchCost {
             search,
-            coarse_centroid_candidates: 0,
-            fine_centroid_candidates: self.centroid_count,
+            coarse_centroid_candidates: selection.coarse_centroid_candidates,
+            fine_centroid_candidates: selection.fine_centroid_candidates,
         }
     }
 
@@ -1158,21 +1125,9 @@ impl IvfIndex {
             vector,
             context,
             COARSE_PROBES,
-            false,
+            CentroidCostMode::FineOnly,
         );
-        let mut search =
-            self.search_cost_from_centroids(&selection.centroids[..selection.len], vector);
-
-        search.centroid_candidates = selection.cost.candidates;
-        search.centroid_early_discards = selection.cost.early_discards;
-        search.centroid_full_distance_candidates = selection.cost.full_distance_candidates;
-        search.centroid_vector_dimensions_evaluated = selection.cost.vector_dimensions_evaluated;
-
-        HierarchySearchCost {
-            search,
-            coarse_centroid_candidates: selection.coarse_centroid_candidates,
-            fine_centroid_candidates: selection.fine_centroid_candidates,
-        }
+        self.search_cost_from_selected_centroids(&selection, selection.len, vector)
     }
 
     #[allow(dead_code)]
@@ -1182,14 +1137,13 @@ impl IvfIndex {
         context: &SearchContext,
         vector: &ReferenceVector,
     ) -> HierarchySearchCost {
-        let selection =
-            hierarchy.select_fine_centroids_from_context_coarse(context, COARSE_PROBES, false);
+        let selection = hierarchy.select_fine_centroids_from_context_coarse(
+            context,
+            COARSE_PROBES,
+            CentroidCostMode::FineOnly,
+        );
         let mut search = self.search_cost_from_centroids(&selection.centroids, vector);
-
-        search.centroid_candidates = selection.cost.candidates;
-        search.centroid_early_discards = selection.cost.early_discards;
-        search.centroid_full_distance_candidates = selection.cost.full_distance_candidates;
-        search.centroid_vector_dimensions_evaluated = selection.cost.vector_dimensions_evaluated;
+        apply_centroid_search_cost(&mut search, selection.cost);
 
         HierarchySearchCost {
             search,
@@ -1262,58 +1216,6 @@ impl IvfIndex {
             offsets,
             fine_centroids,
         }
-    }
-
-    fn nearest_centroid_indexes_with_cost_for<const N: usize>(
-        &self,
-        vector: &ReferenceVector,
-    ) -> ([usize; N], usize, CentroidSearchCost) {
-        let mut nearest = [0; N];
-        let mut distances = [u64::MAX; N];
-        let mut len = 0;
-        let mut farthest_slot = 0;
-        let mut cost = CentroidSearchCost::default();
-
-        for centroid in 0..self.centroid_count {
-            let limit = if len < N {
-                u64::MAX
-            } else {
-                distances[farthest_slot]
-            };
-            let evaluation = self.centroid_distance2_at_limited(centroid, vector, limit);
-            let distance = evaluation.distance;
-
-            cost.candidates += 1;
-            cost.vector_dimensions_evaluated += evaluation.dimensions;
-
-            if evaluation.early_discard {
-                cost.early_discards += 1;
-            } else {
-                cost.full_distance_candidates += 1;
-            }
-
-            if len == N && distance >= distances[farthest_slot] {
-                continue;
-            }
-
-            if len < N {
-                nearest[len] = centroid;
-                distances[len] = distance;
-
-                if distance > distances[farthest_slot] {
-                    farthest_slot = len;
-                }
-
-                len += 1;
-                continue;
-            }
-
-            nearest[farthest_slot] = centroid;
-            distances[farthest_slot] = distance;
-            farthest_slot = farthest_slot_in(&distances);
-        }
-
-        (nearest, len, cost)
     }
 
     fn centroid_distance2_at_limited(
@@ -1423,7 +1325,6 @@ fn vector_mmap_at(mmap: &Mmap, offset: usize) -> ReferenceVector {
     vector
 }
 
-#[allow(dead_code)]
 struct CostTop {
     indexes: [usize; NEAREST_COUNT],
     distances: [u64; NEAREST_COUNT],
@@ -1431,7 +1332,6 @@ struct CostTop {
     farthest_slot: usize,
 }
 
-#[allow(dead_code)]
 impl CostTop {
     fn new() -> Self {
         Self {
@@ -1455,10 +1355,7 @@ impl CostTop {
             return;
         }
 
-        if self.indexes[..self.len]
-            .iter()
-            .any(|candidate| *candidate == index)
-        {
+        if self.indexes[..self.len].contains(&index) {
             return;
         }
 
@@ -1515,14 +1412,14 @@ impl IvfLayout {
 
         let count = read_u64_at(bytes, IVF_MAGIC.len()) as usize;
 
-        if let Some(expected_reference_count) = expected_reference_count {
-            if count != expected_reference_count {
-                bail!(
-                    "invalid IVF binary: expected {} references, got {}",
-                    expected_reference_count,
-                    count
-                );
-            }
+        if let Some(expected_reference_count) = expected_reference_count
+            && count != expected_reference_count
+        {
+            bail!(
+                "invalid IVF binary: expected {} references, got {}",
+                expected_reference_count,
+                count
+            );
         }
 
         let centroid_count_offset = IVF_MAGIC.len() + size_of::<u64>();

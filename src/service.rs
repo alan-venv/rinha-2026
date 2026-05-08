@@ -7,16 +7,44 @@ use crate::dto::{ContentRequest, Customer, LastTransaction, Merchant, Transactio
 use crate::memory::ReferenceSource;
 use rinha::*;
 
-pub struct FraudScoreDetails {
-    pub score: f32,
-    #[allow(dead_code)]
-    pub boundary_case: bool,
-    #[allow(dead_code)]
-    pub probes_used: usize,
-    #[allow(dead_code)]
-    pub fallback_used: bool,
-    #[allow(dead_code)]
-    pub rescue_used: bool,
+pub fn vectorization(request: ContentRequest) -> ReferenceVector {
+    let transaction = &request.transaction;
+    let last_transaction = &request.last_transaction;
+    let customer = &request.customer;
+    let merchant = &request.merchant;
+    let terminal = &request.terminal;
+
+    let n0 = clamp(transaction.amount / MAX_AMOUNT);
+    let n1 = clamp(transaction.installments / MAX_INSTALLMENTS);
+    let n2 = clamp((transaction.amount / customer.avg_amount) / AMOUNT_VS_AVG_RATIO);
+    let n3 = transaction.requested_at.hour() as f32 / 23.0;
+    let n4 = transaction.requested_at.weekday().num_days_from_monday() as f32 / 6.0;
+    let n5 = minutes_since_last_transaction(transaction, last_transaction);
+    let n6 = km_from_last_transaction(last_transaction);
+    let n7 = clamp(terminal.km_from_home / MAX_KM);
+    let n8 = clamp(customer.tx_count_24h / MAX_TX_COUNT_24H);
+    let n9: f32 = if terminal.is_online { 1.0 } else { 0.0 };
+    let n10: f32 = if terminal.card_present { 1.0 } else { 0.0 };
+    let n11 = unknown_merchant(customer, merchant);
+    let n12 = mcc_risk(&merchant.mcc);
+    let n13 = clamp(merchant.avg_amount / MAX_MERCHANT_AVG_AMOUNT);
+
+    [
+        quantize(n0),
+        quantize(n1),
+        quantize(n2),
+        quantize(n3),
+        quantize(n4),
+        quantize(n5),
+        quantize(n6),
+        quantize(n7),
+        quantize(n8),
+        quantize(n9),
+        quantize(n10),
+        quantize(n11),
+        quantize(n12),
+        quantize(n13),
+    ]
 }
 
 #[allow(dead_code)]
@@ -24,22 +52,52 @@ pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?
     fraud_score_details(vector, records).score
 }
 
-pub fn fraud_score_details(
-    vector: &ReferenceVector,
+fn clamp(value: f64) -> f32 {
+    value.clamp(0.0, 1.0) as f32
+}
+
+fn quantize(value: f32) -> i16 {
+    (value * VECTOR_SCALE).round() as i16
+}
+
+fn minutes_since_last_transaction(
+    transaction: &Transaction,
+    last_transaction: &Option<LastTransaction>,
+) -> f32 {
+    let requested_at = &transaction.requested_at;
+    last_transaction.as_ref().map_or(-1.0, |last| {
+        let minutes = requested_at
+            .signed_duration_since(last.timestamp)
+            .num_minutes()
+            .max(0) as f64
+            / MAX_MINUTES;
+        clamp(minutes)
+    })
+}
+
+fn km_from_last_transaction(last_transaction: &Option<LastTransaction>) -> f32 {
+    last_transaction
+        .as_ref()
+        .map_or(-1.0, |last| clamp(last.km_from_current / MAX_KM))
+}
+
+fn unknown_merchant(customer: &Customer, merchant: &Merchant) -> f32 {
+    if customer.known_merchants.contains(&merchant.id) {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+fn score_from_nearest_result(
+    nearest_result: &NearestResult,
     records: &(impl ReferenceSource + ?Sized),
-) -> FraudScoreDetails {
-    let nearest_result = nearest(vector, records);
+) -> f32 {
     let candidates = nearest_result.candidates();
     let score_candidates = &candidates[..candidates.len().min(NEAREST_COUNT)];
     let top_fraud_count = fraud_count(score_candidates, records);
 
-    FraudScoreDetails {
-        score: top_fraud_count as f32 / score_candidates.len() as f32,
-        boundary_case: nearest_result.boundary_case,
-        probes_used: nearest_result.probes_used,
-        fallback_used: nearest_result.fallback_used,
-        rescue_used: nearest_result.rescue_used,
-    }
+    top_fraud_count as f32 / score_candidates.len() as f32
 }
 
 fn fraud_count(nearest: &[NearestCandidate], records: &(impl ReferenceSource + ?Sized)) -> usize {
@@ -47,17 +105,6 @@ fn fraud_count(nearest: &[NearestCandidate], records: &(impl ReferenceSource + ?
         .iter()
         .filter(|candidate| records.is_fraud(candidate.index))
         .count()
-}
-
-#[cfg(test)]
-fn exact_distance2(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
-    a.iter()
-        .zip(b)
-        .map(|(left, right)| {
-            let delta = i64::from(*left) - i64::from(*right);
-            (delta * delta) as u64
-        })
-        .sum()
 }
 
 #[derive(Clone, Copy)]
@@ -268,85 +315,30 @@ fn is_boundary_case(
     frauds > 0 && frauds < top.len()
 }
 
-#[cfg(test)]
-fn euclidean_distance2(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
-    exact_distance2(a, b)
+pub struct FraudScoreDetails {
+    pub score: f32,
+    #[allow(dead_code)]
+    pub boundary_case: bool,
+    #[allow(dead_code)]
+    pub probes_used: usize,
+    #[allow(dead_code)]
+    pub fallback_used: bool,
+    #[allow(dead_code)]
+    pub rescue_used: bool,
 }
 
-pub fn vectorization(request: ContentRequest) -> ReferenceVector {
-    let transaction = &request.transaction;
-    let last_transaction = &request.last_transaction;
-    let customer = &request.customer;
-    let merchant = &request.merchant;
-    let terminal = &request.terminal;
+pub fn fraud_score_details(
+    vector: &ReferenceVector,
+    records: &(impl ReferenceSource + ?Sized),
+) -> FraudScoreDetails {
+    let nearest_result = nearest(vector, records);
 
-    let n0 = clamp(transaction.amount / MAX_AMOUNT);
-    let n1 = clamp(transaction.installments / MAX_INSTALLMENTS);
-    let n2 = clamp((transaction.amount / customer.avg_amount) / AMOUNT_VS_AVG_RATIO);
-    let n3 = transaction.requested_at.hour() as f32 / 23.0;
-    let n4 = transaction.requested_at.weekday().num_days_from_monday() as f32 / 6.0;
-    let n5 = minutes_since_last_transaction(transaction, last_transaction);
-    let n6 = km_from_last_transaction(last_transaction);
-    let n7 = clamp(terminal.km_from_home / MAX_KM);
-    let n8 = clamp(customer.tx_count_24h / MAX_TX_COUNT_24H);
-    let n9: f32 = if terminal.is_online { 1.0 } else { 0.0 };
-    let n10: f32 = if terminal.card_present { 1.0 } else { 0.0 };
-    let n11 = unknown_merchant(customer, merchant);
-    let n12 = mcc_risk(&merchant.mcc);
-    let n13 = clamp(merchant.avg_amount / MAX_MERCHANT_AVG_AMOUNT);
-
-    [
-        quantize(n0),
-        quantize(n1),
-        quantize(n2),
-        quantize(n3),
-        quantize(n4),
-        quantize(n5),
-        quantize(n6),
-        quantize(n7),
-        quantize(n8),
-        quantize(n9),
-        quantize(n10),
-        quantize(n11),
-        quantize(n12),
-        quantize(n13),
-    ]
-}
-
-fn clamp(value: f64) -> f32 {
-    value.clamp(0.0, 1.0) as f32
-}
-
-fn quantize(value: f32) -> i16 {
-    (value * VECTOR_SCALE).round() as i16
-}
-
-fn minutes_since_last_transaction(
-    transaction: &Transaction,
-    last_transaction: &Option<LastTransaction>,
-) -> f32 {
-    let requested_at = &transaction.requested_at;
-    last_transaction.as_ref().map_or(-1.0, |last| {
-        let minutes = requested_at
-            .signed_duration_since(last.timestamp)
-            .num_minutes()
-            .max(0) as f64
-            / MAX_MINUTES;
-        clamp(minutes)
-    })
-}
-
-fn km_from_last_transaction(last_transaction: &Option<LastTransaction>) -> f32 {
-    last_transaction
-        .as_ref()
-        .map_or(-1.0, |last| clamp(last.km_from_current / MAX_KM))
-}
-
-fn unknown_merchant(customer: &Customer, merchant: &Merchant) -> f32 {
-    if customer.known_merchants.contains(&merchant.id) {
-        0.0
-    } else {
-        1.0
+    FraudScoreDetails {
+        score: score_from_nearest_result(&nearest_result, records),
+        boundary_case: nearest_result.boundary_case,
+        probes_used: nearest_result.probes_used,
+        fallback_used: nearest_result.fallback_used,
+        rescue_used: nearest_result.rescue_used,
     }
 }
 
@@ -390,6 +382,20 @@ mod tests {
             vector: [value; VECTOR_DIMENSIONS],
             is_fraud,
         }
+    }
+
+    fn exact_distance2(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
+        a.iter()
+            .zip(b)
+            .map(|(left, right)| {
+                let delta = i64::from(*left) - i64::from(*right);
+                (delta * delta) as u64
+            })
+            .sum()
+    }
+
+    fn euclidean_distance2(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
+        exact_distance2(a, b)
     }
 
     struct GroupedRecords {
