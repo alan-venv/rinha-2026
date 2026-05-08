@@ -44,10 +44,10 @@ impl ReferenceDataset {
         self.vectors[index]
     }
 
-    fn quantize_vector(vector: &[f32; INPUT_VECTOR_DIMENSIONS]) -> ReferenceVector {
+    fn quantize_vector(vector: &[f32; 14]) -> ReferenceVector {
         let mut quantized = [0; VECTOR_DIMENSIONS];
-        for (output, input) in quantized[..INPUT_VECTOR_DIMENSIONS].iter_mut().zip(vector) {
-            *output = (*input * VECTOR_SCALE).round() as i16;
+        for (output, input) in quantized[..14].iter_mut().zip(vector) {
+            *output = (*input * 10_000.0).round() as i16;
         }
         quantized
     }

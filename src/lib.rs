@@ -1,7 +1,5 @@
 // COMMON
-pub const INPUT_VECTOR_DIMENSIONS: usize = 14;
 pub const VECTOR_DIMENSIONS: usize = 16;
-pub const VECTOR_SCALE: f32 = 10_000.0;
 pub const VECTOR_LEN: usize = VECTOR_DIMENSIONS * size_of::<i16>();
 pub type ReferenceVector = [i16; VECTOR_DIMENSIONS];
 pub const NEAREST_COUNT: usize = 5;
@@ -16,7 +14,7 @@ pub const IVF_FINE_CENTROIDS: usize = 16384;
 pub const IVF_FINE_SAMPLES: usize = 1_048_576;
 pub const IVF_FINE_PROBES: usize = 12;
 pub const SIMD_EARLY_DIMENSIONS: usize = 8;
-pub const IVF_MAX_COARSE_PROBES: usize = 15; // 16 for safe reasons
+pub const IVF_MAX_COARSE_PROBES: usize = 16;
 pub const IVF_COARSE_CENTROIDS: usize = 512;
 pub const IVF_COARSE_PROBES: usize = 8;
 pub const IVF_COARSE_ITERATIONS: usize = 6;

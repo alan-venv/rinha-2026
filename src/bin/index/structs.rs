@@ -1,9 +1,8 @@
-use rinha::*;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct ReferenceJson {
-    pub vector: [f32; INPUT_VECTOR_DIMENSIONS],
+    pub vector: [f32; 14],
     pub label: JsonLabel,
 }
 

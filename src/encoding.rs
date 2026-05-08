@@ -41,7 +41,7 @@ fn c(x: f64) -> f32 {
 }
 
 fn q(x: f32) -> i16 {
-    (x * VECTOR_SCALE).round() as i16
+    (x * 10_000.0).round() as i16
 }
 
 fn f5(t: &Transaction, l: &Option<LastTransaction>) -> f32 {
