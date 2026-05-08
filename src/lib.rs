@@ -21,7 +21,6 @@ pub const HIERARCHY_COARSE_CENTROIDS: usize = 512;
 pub const HIERARCHY_COARSE_PROBES: usize = 8;
 pub const HIERARCHY_COARSE_ITERATIONS: usize = 6;
 
-pub mod consts;
 pub mod controller;
 pub mod dto;
 pub mod encoding;
