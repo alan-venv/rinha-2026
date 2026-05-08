@@ -23,18 +23,10 @@ struct TestEntry {
 
 #[derive(Serialize)]
 struct DiagnoseOutput {
-    config: DiagnoseHierarchyConfig,
     core: DiagnoseCore,
+    warnings: DiagnoseWarnings,
     candidates: DiagnoseCandidates,
     centroids: DiagnoseCentroids,
-}
-
-#[derive(Serialize)]
-struct DiagnoseHierarchyConfig {
-    coarse_centroids: usize,
-    coarse_probes: usize,
-    coarse_iterations: usize,
-    boundary_coarse_group_probes: usize,
 }
 
 #[derive(Serialize)]
@@ -44,14 +36,55 @@ struct DiagnoseCore {
     hierarchy_build_elapsed_ms: u128,
     boundary_cases: usize,
     boundary_case_percentage: String,
-    avg_probes_used: usize,
-    max_probes_used: usize,
     decision_mismatches: usize,
     decision_mismatch_percentage: String,
     boundary_decision_mismatches: usize,
     primary_only_decision_mismatches: usize,
     avg_search_cost_units: usize,
     max_search_cost_units: usize,
+}
+
+#[derive(Serialize)]
+struct DiagnoseWarnings {
+    items: Vec<DiagnoseWarning>,
+}
+
+#[derive(Serialize)]
+struct DiagnoseWarning {
+    metric: &'static str,
+    actual: String,
+    limit: String,
+}
+
+#[derive(Default)]
+struct MetricAccumulator {
+    sum: usize,
+    count: usize,
+    max: usize,
+}
+
+impl MetricAccumulator {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn record(&mut self, value: usize) {
+        self.sum += value;
+        self.count += 1;
+        self.max = self.max.max(value);
+    }
+
+    fn average(&self) -> usize {
+        if self.count == 0 {
+            return 0;
+        }
+
+        (self.sum as f64 / self.count as f64).round() as usize
+    }
+
+    fn max(&self) -> usize {
+        self.max
+    }
 }
 
 #[derive(Serialize)]
@@ -84,19 +117,18 @@ fn main() -> Result<()> {
     let mut boundary_cases = 0;
     let mut boundary_decision_mismatches = 0;
     let mut primary_only_decision_mismatches = 0;
-    let mut probes_used = Vec::with_capacity(total);
-    let mut primary_list_candidates = Vec::with_capacity(total);
-    let mut coarse_centroid_candidates = Vec::with_capacity(total);
-    let mut fine_centroid_candidates = Vec::with_capacity(total);
-    let mut centroid_candidates = Vec::with_capacity(total);
-    let mut centroid_early_discards = Vec::with_capacity(total);
-    let mut centroid_full_distance_candidates = Vec::with_capacity(total);
-    let mut centroid_vector_dimensions_evaluated = Vec::with_capacity(total);
-    let mut flat_candidates = Vec::with_capacity(total);
-    let mut flat_early_discards = Vec::with_capacity(total);
-    let mut flat_full_distance_candidates = Vec::with_capacity(total);
-    let mut flat_vector_dimensions_evaluated = Vec::with_capacity(total);
-    let mut search_cost_units = Vec::with_capacity(total);
+    let mut primary_list_candidates = MetricAccumulator::new();
+    let mut coarse_centroid_candidates = MetricAccumulator::new();
+    let mut fine_centroid_candidates = MetricAccumulator::new();
+    let mut centroid_candidates = MetricAccumulator::new();
+    let mut centroid_early_discards = MetricAccumulator::new();
+    let mut centroid_full_distance_candidates = MetricAccumulator::new();
+    let mut centroid_vector_dimensions_evaluated = MetricAccumulator::new();
+    let mut flat_candidates = MetricAccumulator::new();
+    let mut flat_early_discards = MetricAccumulator::new();
+    let mut flat_full_distance_candidates = MetricAccumulator::new();
+    let mut flat_vector_dimensions_evaluated = MetricAccumulator::new();
+    let mut search_cost_units = MetricAccumulator::new();
 
     for entry in data.entries {
         let vector = encoding::vectorization(entry.request);
@@ -112,21 +144,20 @@ fn main() -> Result<()> {
         let fine_candidates = primary.fine_centroid_candidates;
         let total_units = primary.total_units();
 
-        primary_list_candidates.push(cost.primary_list_candidates);
-        coarse_centroid_candidates.push(coarse_candidates);
-        fine_centroid_candidates.push(fine_candidates);
-        centroid_candidates.push(cost.centroid_candidates);
-        centroid_early_discards.push(cost.centroid_early_discards);
-        centroid_full_distance_candidates.push(cost.centroid_full_distance_candidates);
-        centroid_vector_dimensions_evaluated.push(cost.centroid_vector_dimensions_evaluated);
-        flat_candidates.push(cost.flat_candidates);
-        flat_early_discards.push(cost.flat_early_discards);
-        flat_full_distance_candidates.push(cost.flat_full_distance_candidates);
-        flat_vector_dimensions_evaluated.push(cost.flat_vector_dimensions_evaluated);
-        search_cost_units.push(total_units);
+        primary_list_candidates.record(cost.primary_list_candidates);
+        coarse_centroid_candidates.record(coarse_candidates);
+        fine_centroid_candidates.record(fine_candidates);
+        centroid_candidates.record(cost.centroid_candidates);
+        centroid_early_discards.record(cost.centroid_early_discards);
+        centroid_full_distance_candidates.record(cost.centroid_full_distance_candidates);
+        centroid_vector_dimensions_evaluated.record(cost.centroid_vector_dimensions_evaluated);
+        flat_candidates.record(cost.flat_candidates);
+        flat_early_discards.record(cost.flat_early_discards);
+        flat_full_distance_candidates.record(cost.flat_full_distance_candidates);
+        flat_vector_dimensions_evaluated.record(cost.flat_vector_dimensions_evaluated);
+        search_cost_units.record(total_units);
 
         let approved = details.score < 0.6;
-        probes_used.push(details.probes_used);
 
         if details.boundary_case {
             boundary_cases += 1;
@@ -144,89 +175,79 @@ fn main() -> Result<()> {
         }
     }
 
-    let hierarchy_config = references.hierarchy_config();
+    let core = DiagnoseCore {
+        entries: total,
+        elapsed_ms: started.elapsed().as_millis(),
+        hierarchy_build_elapsed_ms: references.hierarchy_build_elapsed_ms(),
+        boundary_cases,
+        boundary_case_percentage: percentage(boundary_cases, total),
+        decision_mismatches,
+        decision_mismatch_percentage: percentage(decision_mismatches, total),
+        boundary_decision_mismatches,
+        primary_only_decision_mismatches,
+        avg_search_cost_units: search_cost_units.average(),
+        max_search_cost_units: search_cost_units.max(),
+    };
     let output = DiagnoseOutput {
-        config: DiagnoseHierarchyConfig {
-            coarse_centroids: hierarchy_config.coarse_centroids,
-            coarse_probes: hierarchy_config.coarse_probes,
-            coarse_iterations: hierarchy_config.coarse_iterations,
-            boundary_coarse_group_probes: hierarchy_config.boundary_coarse_group_probes,
-        },
-        core: DiagnoseCore {
-            entries: total,
-            elapsed_ms: started.elapsed().as_millis(),
-            hierarchy_build_elapsed_ms: references.hierarchy_build_elapsed_ms(),
-            boundary_cases,
-            boundary_case_percentage: percentage(boundary_cases, total),
-            avg_probes_used: average(&probes_used),
-            max_probes_used: probes_used.iter().copied().max().unwrap_or(0),
-            decision_mismatches,
-            decision_mismatch_percentage: percentage(decision_mismatches, total),
-            boundary_decision_mismatches,
-            primary_only_decision_mismatches,
-            avg_search_cost_units: average(&search_cost_units),
-            max_search_cost_units: search_cost_units.iter().copied().max().unwrap_or(0),
-        },
+        warnings: diagnose_warnings(&core),
+        core,
         candidates: DiagnoseCandidates {
-            avg_primary_list_candidates: average(&primary_list_candidates),
-            max_primary_list_candidates: primary_list_candidates.iter().copied().max().unwrap_or(0),
-            avg_flat_candidates: average(&flat_candidates),
-            avg_flat_early_discards: average(&flat_early_discards),
-            avg_flat_full_distance_candidates: average(&flat_full_distance_candidates),
-            avg_flat_vector_dimensions_evaluated: average(&flat_vector_dimensions_evaluated),
+            avg_primary_list_candidates: primary_list_candidates.average(),
+            max_primary_list_candidates: primary_list_candidates.max(),
+            avg_flat_candidates: flat_candidates.average(),
+            avg_flat_early_discards: flat_early_discards.average(),
+            avg_flat_full_distance_candidates: flat_full_distance_candidates.average(),
+            avg_flat_vector_dimensions_evaluated: flat_vector_dimensions_evaluated.average(),
         },
         centroids: DiagnoseCentroids {
-            avg_coarse_centroid_candidates: average(&coarse_centroid_candidates),
-            avg_fine_centroid_candidates: average(&fine_centroid_candidates),
-            avg_centroid_candidates: average(&centroid_candidates),
-            avg_centroid_early_discards: average(&centroid_early_discards),
-            avg_centroid_full_distance_candidates: average(&centroid_full_distance_candidates),
-            avg_centroid_vector_dimensions_evaluated: average(
-                &centroid_vector_dimensions_evaluated,
-            ),
+            avg_coarse_centroid_candidates: coarse_centroid_candidates.average(),
+            avg_fine_centroid_candidates: fine_centroid_candidates.average(),
+            avg_centroid_candidates: centroid_candidates.average(),
+            avg_centroid_early_discards: centroid_early_discards.average(),
+            avg_centroid_full_distance_candidates: centroid_full_distance_candidates.average(),
+            avg_centroid_vector_dimensions_evaluated: centroid_vector_dimensions_evaluated
+                .average(),
         },
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
-    print_warnings(&output);
 
     Ok(())
 }
 
-fn print_warnings(output: &DiagnoseOutput) {
-    if output.core.elapsed_ms > MAX_ELAPSED_MS {
-        println!(
-            "warning: elapsed_ms={} > {}",
-            output.core.elapsed_ms, MAX_ELAPSED_MS
-        );
+fn diagnose_warnings(core: &DiagnoseCore) -> DiagnoseWarnings {
+    let mut items = Vec::new();
+
+    if core.elapsed_ms > MAX_ELAPSED_MS {
+        items.push(DiagnoseWarning {
+            metric: "elapsed_ms",
+            actual: core.elapsed_ms.to_string(),
+            limit: MAX_ELAPSED_MS.to_string(),
+        });
     }
 
-    let boundary_case_percentage =
-        percentage_value(output.core.boundary_cases, output.core.entries);
+    let boundary_case_percentage = percentage_value(core.boundary_cases, core.entries);
     if boundary_case_percentage > MAX_BOUNDARY_CASE_PERCENTAGE {
-        println!(
-            "warning: boundary_case_percentage={boundary_case_percentage:.2}% > {MAX_BOUNDARY_CASE_PERCENTAGE:.2}%"
-        );
+        items.push(DiagnoseWarning {
+            metric: "boundary_case_percentage",
+            actual: format!("{boundary_case_percentage:.2}%"),
+            limit: format!("{MAX_BOUNDARY_CASE_PERCENTAGE:.2}%"),
+        });
     }
 
-    if output.core.primary_only_decision_mismatches > 0 {
-        println!(
-            "warning: primary_only_decision_mismatches={} > 0",
-            output.core.primary_only_decision_mismatches
-        );
+    if core.primary_only_decision_mismatches > 0 {
+        items.push(DiagnoseWarning {
+            metric: "primary_only_decision_mismatches",
+            actual: core.primary_only_decision_mismatches.to_string(),
+            limit: "0".to_string(),
+        });
     }
+
+    DiagnoseWarnings { items }
 }
 
 fn percentage(value: usize, total: usize) -> String {
     format!("{:.2}%", percentage_value(value, total))
-}
-
-fn average(values: &[usize]) -> usize {
-    if values.is_empty() {
-        return 0;
-    }
-
-    (values.iter().sum::<usize>() as f64 / values.len() as f64).round() as usize
 }
 
 fn percentage_value(value: usize, total: usize) -> f64 {
