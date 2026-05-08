@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct ContentRequest {
@@ -45,21 +45,6 @@ pub struct Terminal {
 pub struct LastTransaction {
     pub timestamp: DateTime<Utc>,
     pub km_from_current: f64,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct ContentResponse {
-    pub approved: bool,
-    pub fraud_score: f32,
-}
-
-impl ContentResponse {
-    pub fn from(score: f32) -> Self {
-        Self {
-            fraud_score: score,
-            approved: score < 0.6,
-        }
-    }
 }
 
 struct Record {
