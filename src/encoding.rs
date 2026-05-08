@@ -4,20 +4,9 @@ use crate::dto::{ContentRequest, LastTransaction, Transaction};
 use crate::*;
 
 const N: [f64; 7] = [10000.0, 12.0, 10.0, 1440.0, 1000.0, 20.0, 10000.0];
-
 const R0: f32 = 0.5;
-const R: &[(u16, f32)] = &[
-    (4511, 0.35),
-    (5311, 0.25),
-    (5411, 0.15),
-    (5812, 0.30),
-    (5912, 0.20),
-    (5944, 0.45),
-    (5999, 0.50),
-    (7801, 0.80),
-    (7802, 0.75),
-    (7995, 0.85),
-];
+const RK: [u16; 10] = [4511, 5311, 5411, 5812, 5912, 5944, 5999, 7801, 7802, 7995];
+const RV: [f32; 10] = [0.35, 0.25, 0.15, 0.30, 0.20, 0.45, 0.50, 0.80, 0.75, 0.85];
 
 pub fn vectorization(request: ContentRequest) -> ReferenceVector {
     let transaction = &request.transaction;
@@ -35,8 +24,8 @@ pub fn vectorization(request: ContentRequest) -> ReferenceVector {
     let n6 = f6(last_transaction);
     let n7 = c(terminal.km_from_home / N[4]);
     let n8 = c(customer.tx_count_24h / N[5]);
-    let n9: f32 = if terminal.is_online { 1.0 } else { 0.0 };
-    let n10: f32 = if terminal.card_present { 1.0 } else { 0.0 };
+    let n9 = terminal.is_online as u8 as f32;
+    let n10 = terminal.card_present as u8 as f32;
     let n11 = f11(&customer.known_merchants, &merchant.id);
     let n12 = f12(&merchant.mcc);
     let n13 = c(merchant.avg_amount / N[6]);
@@ -67,7 +56,7 @@ fn f6(x: &Option<LastTransaction>) -> f32 {
 }
 
 fn f11(xs: &[String], x: &str) -> f32 {
-    if xs.iter().any(|y| y == x) { 0.0 } else { 1.0 }
+    (!xs.iter().any(|y| y == x)) as u8 as f32
 }
 
 fn f12(x: &str) -> f32 {
@@ -75,8 +64,8 @@ fn f12(x: &str) -> f32 {
         return R0;
     };
 
-    match R.binary_search_by_key(&x, |(y, _)| *y) {
-        Ok(i) => R[i].1,
+    match RK.binary_search(&x) {
+        Ok(i) => RV[i],
         Err(_) => R0,
     }
 }
@@ -218,7 +207,7 @@ mod tests {
 
     #[test]
     fn mcc_risk_is_sorted_for_binary_search() {
-        assert!(R.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(RK.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
