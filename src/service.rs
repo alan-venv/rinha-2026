@@ -1,7 +1,11 @@
 use std::cell::Cell;
+use std::env;
+use std::sync::OnceLock;
 
 use crate::memory::ReferenceSource;
 use crate::*;
+
+static PRIMARY_PROBES: OnceLock<usize> = OnceLock::new();
 
 #[allow(dead_code)]
 pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> f32 {
@@ -125,11 +129,12 @@ fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) 
     let context = records.prepare_search_context(vector);
     let mut nearest = TopNearest::new();
     let current_worst_distance = Cell::new(u64::MAX);
+    let probe_count = primary_probe_count();
     records.for_each_primary_candidate_batch(
         &context,
         vector,
         0,
-        IVF_INITIAL_PROBES,
+        probe_count,
         &mut || current_worst_distance.get(),
         &mut |index, distance| {
             nearest.add(NearestCandidate { index, distance });
@@ -140,84 +145,24 @@ fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) 
     nearest.sort_candidates();
     let boundary_case = is_boundary_case(&nearest.candidates[..nearest.len], records);
 
-    if !boundary_case {
-        return NearestResult {
-            candidates: nearest.candidates,
-            len: nearest.len,
-            boundary_case,
-            probes_used: IVF_INITIAL_PROBES,
-            fallback_used: false,
-            rescue_used: false,
-        };
-    }
-
-    let mut fallback_nearest = TopNearest::new();
-    let fallback_current_worst_distance = Cell::new(u64::MAX);
-    let fallback_used = records.for_each_boundary_fallback_candidate(
-        &context,
-        vector,
-        &mut || fallback_current_worst_distance.get(),
-        &mut |index, distance| {
-            fallback_nearest.add(NearestCandidate { index, distance });
-            fallback_current_worst_distance.set(fallback_nearest.current_worst_distance());
-        },
-    );
-
-    if fallback_used {
-        fallback_nearest.sort_candidates();
-        let fallback_candidates = &fallback_nearest.candidates[..fallback_nearest.len];
-        let fallback_score_candidates =
-            &fallback_candidates[..fallback_candidates.len().min(NEAREST_COUNT)];
-        let fallback_fraud_count = fraud_count(fallback_score_candidates, records);
-        let boundary_case = is_boundary_case(fallback_candidates, records);
-
-        if fallback_fraud_count == 3 {
-            let mut rescue_nearest = TopNearest::new();
-            let rescue_current_worst_distance = Cell::new(u64::MAX);
-            let rescue_used = records.for_each_boundary_rescue_candidate(
-                &context,
-                vector,
-                &mut || rescue_current_worst_distance.get(),
-                &mut |index, distance| {
-                    rescue_nearest.add(NearestCandidate { index, distance });
-                    rescue_current_worst_distance.set(rescue_nearest.current_worst_distance());
-                },
-            );
-
-            if rescue_used {
-                rescue_nearest.sort_candidates();
-                let boundary_case =
-                    is_boundary_case(&rescue_nearest.candidates[..rescue_nearest.len], records);
-
-                return NearestResult {
-                    candidates: rescue_nearest.candidates,
-                    len: rescue_nearest.len,
-                    boundary_case,
-                    probes_used: records.boundary_rescue_probe_count(),
-                    fallback_used: true,
-                    rescue_used: true,
-                };
-            }
-        }
-
-        return NearestResult {
-            candidates: fallback_nearest.candidates,
-            len: fallback_nearest.len,
-            boundary_case,
-            probes_used: records.boundary_fallback_probe_count(),
-            fallback_used: true,
-            rescue_used: false,
-        };
-    }
-
     NearestResult {
         candidates: nearest.candidates,
         len: nearest.len,
         boundary_case,
-        probes_used: IVF_INITIAL_PROBES,
+        probes_used: probe_count,
         fallback_used: false,
         rescue_used: false,
     }
+}
+
+fn primary_probe_count() -> usize {
+    *PRIMARY_PROBES.get_or_init(|| {
+        env::var("PRIMARY_PROBES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(6)
+            .clamp(1, IVF_INITIAL_PROBES)
+    })
 }
 
 fn is_boundary_case(

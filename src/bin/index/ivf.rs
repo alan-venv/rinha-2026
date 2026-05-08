@@ -314,9 +314,7 @@ impl IndexIvf {
         writer.write_all(&(indices.len() as u64).to_le_bytes())?;
 
         for centroid in centroids {
-            for value in centroid {
-                writer.write_all(&value.to_le_bytes())?;
-            }
+            Self::write_padded_vector(&mut writer, centroid)?;
         }
 
         for offset in offsets {
@@ -328,13 +326,23 @@ impl IndexIvf {
         }
 
         for vector in &dataset.vectors {
-            for value in vector {
-                writer.write_all(&value.to_le_bytes())?;
-            }
+            Self::write_padded_vector(&mut writer, vector)?;
         }
 
         writer.write_all(dataset.fraud_bits())?;
         writer.flush()?;
+        Ok(())
+    }
+
+    fn write_padded_vector(writer: &mut BufWriter<File>, vector: &ReferenceVector) -> Result<()> {
+        for value in vector {
+            writer.write_all(&value.to_le_bytes())?;
+        }
+
+        for _ in VECTOR_DIMENSIONS..STORED_VECTOR_DIMENSIONS {
+            writer.write_all(&0_i16.to_le_bytes())?;
+        }
+
         Ok(())
     }
 }

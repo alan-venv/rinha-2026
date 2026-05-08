@@ -452,24 +452,58 @@ fn distance2_vector_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64
         };
     }
 
-    let mut dimensions = SIMD_EARLY_DIMENSIONS;
-    for (left, right) in a.iter().zip(b).skip(SIMD_EARLY_DIMENSIONS) {
-        distance += distance2_scalar_delta(*left, *right);
-        dimensions += 1;
+    let tail_distance = distance2_last8_vector(a, b);
+    distance += tail_distance;
 
-        if distance >= limit {
-            return DistanceEval {
-                distance,
-                dimensions,
-                early_discard: false,
-            };
-        }
+    if distance >= limit {
+        return DistanceEval {
+            distance,
+            dimensions: STORED_VECTOR_DIMENSIONS,
+            early_discard: false,
+        };
     }
 
     DistanceEval {
         distance,
-        dimensions,
+        dimensions: STORED_VECTOR_DIMENSIONS,
         early_discard: false,
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn distance2_last8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
+    unsafe {
+        let left = padded_last8_vector(a);
+        let right = padded_last8_vector(b);
+        distance2_first8_sse2(left, right)
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn distance2_last8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
+    let mut dimensions = SIMD_EARLY_DIMENSIONS;
+    let mut distance = 0;
+
+    for (left, right) in a.iter().zip(b).skip(SIMD_EARLY_DIMENSIONS) {
+        distance += distance2_scalar_delta(*left, *right);
+        dimensions += 1;
+    }
+
+    let _ = dimensions;
+    distance
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn padded_last8_vector(vector: &ReferenceVector) -> std::arch::x86_64::__m128i {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        _mm_setr_epi16(
+            vector[8], vector[9], vector[10], vector[11], vector[12], vector[13], 0, 0,
+        )
     }
 }
 
@@ -534,6 +568,7 @@ unsafe fn distance2_first8_sse2(
     lanes.iter().map(|value| *value as u64).sum()
 }
 
+#[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
 fn distance2_scalar_delta(left: i16, right: i16) -> u64 {
     let delta = i64::from(left) - i64::from(right);
@@ -1292,26 +1327,44 @@ fn distance2_mmap_at_limited(
         };
     }
 
-    let mut dimensions = SIMD_EARLY_DIMENSIONS;
-    for (dimension, query_value) in vector.iter().enumerate().skip(SIMD_EARLY_DIMENSIONS) {
-        let reference_value = i16::from_le(unsafe { *reference.add(dimension) });
-        distance += distance2_scalar_delta(*query_value, reference_value);
-        dimensions += 1;
+    distance += distance2_last8_mmap(reference, vector);
 
-        if distance >= limit {
-            return DistanceEval {
-                distance,
-                dimensions,
-                early_discard: false,
-            };
-        }
+    if distance >= limit {
+        return DistanceEval {
+            distance,
+            dimensions: STORED_VECTOR_DIMENSIONS,
+            early_discard: false,
+        };
     }
 
     DistanceEval {
         distance,
-        dimensions,
+        dimensions: STORED_VECTOR_DIMENSIONS,
         early_discard: false,
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn distance2_last8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
+    use std::arch::x86_64::*;
+
+    unsafe {
+        let left = padded_last8_vector(vector);
+        let right = _mm_loadu_si128(reference.add(SIMD_EARLY_DIMENSIONS).cast::<__m128i>());
+        distance2_first8_sse2(left, right)
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn distance2_last8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
+    (SIMD_EARLY_DIMENSIONS..VECTOR_DIMENSIONS)
+        .map(|dimension| {
+            let reference_value = i16::from_le(unsafe { *reference.add(dimension) });
+            distance2_scalar_delta(vector[dimension], reference_value)
+        })
+        .sum()
 }
 
 fn vector_mmap_at(mmap: &Mmap, offset: usize) -> ReferenceVector {
@@ -1486,7 +1539,7 @@ mod tests {
         bytes.extend_from_slice(&(centroid_count as u32).to_le_bytes());
         bytes.extend_from_slice(&(entry_count as u64).to_le_bytes());
 
-        for _ in 0..centroid_count * VECTOR_DIMENSIONS {
+        for _ in 0..centroid_count * STORED_VECTOR_DIMENSIONS {
             bytes.extend_from_slice(&0_i16.to_le_bytes());
         }
 
@@ -1506,7 +1559,7 @@ mod tests {
         }
 
         for index in 0..reference_count {
-            for dimension in 0..VECTOR_DIMENSIONS {
+            for dimension in 0..STORED_VECTOR_DIMENSIONS {
                 let value = if dimension == 0 { index as i16 } else { 0 };
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
