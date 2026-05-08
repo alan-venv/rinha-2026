@@ -55,10 +55,10 @@ pub struct ContentResponse {
 
 impl ContentResponse {
     pub fn from(score: f32) -> Self {
-        return Self {
+        Self {
             fraud_score: score,
             approved: score < 0.6,
-        };
+        }
     }
 }
 

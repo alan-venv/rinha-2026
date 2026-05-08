@@ -2,7 +2,7 @@ use chrono::{Datelike, Timelike};
 
 use crate::consts::*;
 use crate::dto::{ContentRequest, Customer, LastTransaction, Merchant, Transaction};
-use rinha::*;
+use crate::*;
 
 pub fn vectorization(request: ContentRequest) -> ReferenceVector {
     let transaction = &request.transaction;

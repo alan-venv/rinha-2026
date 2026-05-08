@@ -8,7 +8,7 @@ use crate::service;
 
 #[get("/ready")]
 pub async fn ready() -> impl Responder {
-    return HttpResponse::Ok().body("I was born ready");
+    HttpResponse::Ok().body("I was born ready")
 }
 
 #[post("/fraud-score")]
@@ -20,5 +20,5 @@ pub async fn score(
     let score = service::fraud_score(&vector, references.as_ref());
 
     let response = ContentResponse::from(score);
-    return HttpResponse::Ok().json(response);
+    HttpResponse::Ok().json(response)
 }

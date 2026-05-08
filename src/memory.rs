@@ -4,9 +4,9 @@ use std::ops::Range;
 use std::path::Path;
 use std::time::Instant;
 
+use crate::*;
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
-use rinha::*;
 
 const IVF_PATH: &str = "resources/ivf.bin";
 

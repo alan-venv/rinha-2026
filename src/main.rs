@@ -1,10 +1,3 @@
-mod consts;
-mod controller;
-mod dto;
-mod encoding;
-mod memory;
-mod service;
-
 use std::io::{Error, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -12,6 +5,7 @@ use std::path::{Path, PathBuf};
 use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use mimalloc::MiMalloc;
+use rinha::{controller, memory};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -47,6 +41,6 @@ fn socket() -> PathBuf {
 
 fn permissions(socket: &dyn AsRef<Path>) -> Result<()> {
     let permissions = std::fs::Permissions::from_mode(0o766);
-    std::fs::set_permissions(&socket, permissions)?;
+    std::fs::set_permissions(socket, permissions)?;
     Ok(())
 }

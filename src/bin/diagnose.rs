@@ -2,21 +2,10 @@ use std::fs::File;
 use std::time::Instant;
 
 use anyhow::Result;
+use rinha::dto::ContentRequest;
+use rinha::memory::{self, ReferenceSource};
+use rinha::{encoding, service};
 use serde::{Deserialize, Serialize};
-
-#[path = "../consts.rs"]
-mod consts;
-#[path = "../dto.rs"]
-mod dto;
-#[path = "../encoding.rs"]
-mod encoding;
-#[path = "../memory.rs"]
-mod memory;
-#[path = "../service.rs"]
-mod service;
-
-use dto::ContentRequest;
-use memory::ReferenceSource;
 
 const MAX_ELAPSED_MS: u128 = 6_000;
 const MAX_BOUNDARY_CASE_PERCENTAGE: f64 = 10.0;

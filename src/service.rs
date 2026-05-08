@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use crate::memory::ReferenceSource;
-use rinha::*;
+use crate::*;
 
 #[allow(dead_code)]
 pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> f32 {
