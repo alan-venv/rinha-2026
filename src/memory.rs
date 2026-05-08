@@ -285,18 +285,7 @@ impl<const N: usize> ReferenceSource for [ReferenceRecord; N] {
 }
 
 fn distance2_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64) -> u64 {
-    let mut distance = 0;
-
-    for (left, right) in a.iter().zip(b) {
-        let delta = i64::from(*left) - i64::from(*right);
-        distance += (delta * delta) as u64;
-
-        if distance >= limit {
-            return distance;
-        }
-    }
-
-    distance
+    distance2_vector_limited(a, b, limit).distance
 }
 
 fn distance2_vector_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64) -> DistanceEval {
@@ -305,7 +294,7 @@ fn distance2_vector_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64
     if distance >= limit {
         return DistanceEval {
             distance,
-            dimensions: SIMD_EARLY_DIMENSIONS,
+            dimensions: SIMD_LANE_DIMENSIONS,
             early_discard: true,
         };
     }
@@ -328,34 +317,17 @@ fn distance2_vector_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn distance2_last8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
     use std::arch::x86_64::*;
 
     unsafe {
-        let left = _mm_loadu_si128(a.as_ptr().add(SIMD_EARLY_DIMENSIONS).cast::<__m128i>());
-        let right = _mm_loadu_si128(b.as_ptr().add(SIMD_EARLY_DIMENSIONS).cast::<__m128i>());
+        let left = _mm_loadu_si128(a.as_ptr().add(SIMD_LANE_DIMENSIONS).cast::<__m128i>());
+        let right = _mm_loadu_si128(b.as_ptr().add(SIMD_LANE_DIMENSIONS).cast::<__m128i>());
         distance2_first8_sse2(left, right)
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-fn distance2_last8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
-    let mut dimensions = SIMD_EARLY_DIMENSIONS;
-    let mut distance = 0;
-
-    for (left, right) in a.iter().zip(b).skip(SIMD_EARLY_DIMENSIONS) {
-        distance += distance2_scalar_delta(*left, *right);
-        dimensions += 1;
-    }
-
-    let _ = dimensions;
-    distance
-}
-
-#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn distance2_first8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
     use std::arch::x86_64::*;
@@ -367,17 +339,6 @@ fn distance2_first8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-fn distance2_first8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
-    a.iter()
-        .zip(b)
-        .take(SIMD_EARLY_DIMENSIONS)
-        .map(|(left, right)| distance2_scalar_delta(*left, *right))
-        .sum()
-}
-
-#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn distance2_first8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
     use std::arch::x86_64::*;
@@ -389,18 +350,6 @@ fn distance2_first8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-fn distance2_first8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
-    (0..SIMD_EARLY_DIMENSIONS)
-        .map(|dimension| {
-            let reference_value = i16::from_le(unsafe { *reference.add(dimension) });
-            distance2_scalar_delta(vector[dimension], reference_value)
-        })
-        .sum()
-}
-
-#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn distance2_first8_sse2(
     left: std::arch::x86_64::__m128i,
@@ -414,13 +363,6 @@ unsafe fn distance2_first8_sse2(
     unsafe { _mm_storeu_si128(lanes.as_mut_ptr().cast::<__m128i>(), products) };
 
     lanes.iter().map(|value| *value as u64).sum()
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-fn distance2_scalar_delta(left: i16, right: i16) -> u64 {
-    let delta = i64::from(left) - i64::from(right);
-    (delta * delta) as u64
 }
 
 fn initial_sampled_centroids(
@@ -1037,7 +979,7 @@ fn distance2_mmap_at_limited(
     if distance >= limit {
         return DistanceEval {
             distance,
-            dimensions: SIMD_EARLY_DIMENSIONS,
+            dimensions: SIMD_LANE_DIMENSIONS,
             early_discard: true,
         };
     }
@@ -1059,27 +1001,15 @@ fn distance2_mmap_at_limited(
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn distance2_last8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
     use std::arch::x86_64::*;
 
     unsafe {
-        let left = _mm_loadu_si128(vector.as_ptr().add(SIMD_EARLY_DIMENSIONS).cast::<__m128i>());
-        let right = _mm_loadu_si128(reference.add(SIMD_EARLY_DIMENSIONS).cast::<__m128i>());
+        let left = _mm_loadu_si128(vector.as_ptr().add(SIMD_LANE_DIMENSIONS).cast::<__m128i>());
+        let right = _mm_loadu_si128(reference.add(SIMD_LANE_DIMENSIONS).cast::<__m128i>());
         distance2_first8_sse2(left, right)
     }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-fn distance2_last8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
-    (SIMD_EARLY_DIMENSIONS..VECTOR_DIMENSIONS)
-        .map(|dimension| {
-            let reference_value = i16::from_le(unsafe { *reference.add(dimension) });
-            distance2_scalar_delta(vector[dimension], reference_value)
-        })
-        .sum()
 }
 
 fn vector_mmap_at(mmap: &Mmap, offset: usize) -> ReferenceVector {
