@@ -284,18 +284,51 @@ impl IndexIvf {
     }
 
     fn distance2_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64) -> u64 {
-        let mut distance = 0;
+        let mut distance = Self::distance2_first8(a, b);
 
-        for (left, right) in a.iter().zip(b) {
-            let delta = i64::from(*left) - i64::from(*right);
-            distance += (delta * delta) as u64;
-
-            if distance >= limit {
-                return distance;
-            }
+        if distance >= limit {
+            return distance;
         }
 
+        distance += Self::distance2_last8(a, b);
         distance
+    }
+
+    #[inline(always)]
+    fn distance2_first8(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
+        use std::arch::x86_64::*;
+
+        unsafe {
+            let left = _mm_loadu_si128(a.as_ptr().cast::<__m128i>());
+            let right = _mm_loadu_si128(b.as_ptr().cast::<__m128i>());
+            Self::distance2_sse2(left, right)
+        }
+    }
+
+    #[inline(always)]
+    fn distance2_last8(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
+        use std::arch::x86_64::*;
+
+        unsafe {
+            let left = _mm_loadu_si128(a.as_ptr().add(8).cast::<__m128i>());
+            let right = _mm_loadu_si128(b.as_ptr().add(8).cast::<__m128i>());
+            Self::distance2_sse2(left, right)
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn distance2_sse2(
+        left: std::arch::x86_64::__m128i,
+        right: std::arch::x86_64::__m128i,
+    ) -> u64 {
+        use std::arch::x86_64::*;
+
+        let delta = unsafe { _mm_sub_epi16(left, right) };
+        let products = unsafe { _mm_madd_epi16(delta, delta) };
+        let mut lanes = [0_i32; 4];
+        unsafe { _mm_storeu_si128(lanes.as_mut_ptr().cast::<__m128i>(), products) };
+
+        lanes.iter().map(|value| *value as u64).sum()
     }
 
     fn write_index(

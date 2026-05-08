@@ -294,7 +294,7 @@ fn distance2_vector_limited(a: &ReferenceVector, b: &ReferenceVector, limit: u64
     if distance >= limit {
         return DistanceEval {
             distance,
-            dimensions: SIMD_LANE_DIMENSIONS,
+            dimensions: 8,
             early_discard: true,
         };
     }
@@ -322,8 +322,8 @@ fn distance2_last8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
     use std::arch::x86_64::*;
 
     unsafe {
-        let left = _mm_loadu_si128(a.as_ptr().add(SIMD_LANE_DIMENSIONS).cast::<__m128i>());
-        let right = _mm_loadu_si128(b.as_ptr().add(SIMD_LANE_DIMENSIONS).cast::<__m128i>());
+        let left = _mm_loadu_si128(a.as_ptr().add(8).cast::<__m128i>());
+        let right = _mm_loadu_si128(b.as_ptr().add(8).cast::<__m128i>());
         distance2_first8_sse2(left, right)
     }
 }
@@ -979,7 +979,7 @@ fn distance2_mmap_at_limited(
     if distance >= limit {
         return DistanceEval {
             distance,
-            dimensions: SIMD_LANE_DIMENSIONS,
+            dimensions: 8,
             early_discard: true,
         };
     }
@@ -1006,8 +1006,8 @@ fn distance2_last8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 
     use std::arch::x86_64::*;
 
     unsafe {
-        let left = _mm_loadu_si128(vector.as_ptr().add(SIMD_LANE_DIMENSIONS).cast::<__m128i>());
-        let right = _mm_loadu_si128(reference.add(SIMD_LANE_DIMENSIONS).cast::<__m128i>());
+        let left = _mm_loadu_si128(vector.as_ptr().add(8).cast::<__m128i>());
+        let right = _mm_loadu_si128(reference.add(8).cast::<__m128i>());
         distance2_first8_sse2(left, right)
     }
 }
