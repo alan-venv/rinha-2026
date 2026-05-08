@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 mod consts;
 #[path = "../dto.rs"]
 mod dto;
+#[path = "../encoding.rs"]
+mod encoding;
 #[path = "../memory.rs"]
 mod memory;
 #[path = "../service.rs"]
@@ -113,7 +115,7 @@ fn main() -> Result<()> {
     let mut search_cost_units = Vec::with_capacity(total);
 
     for entry in data.entries {
-        let vector = service::vectorization(entry.request);
+        let vector = encoding::vectorization(entry.request);
         let context = references.prepare_search_context(&vector);
         let details = service::fraud_score_details(&vector, &references);
         let primary = references.search_cost_for_probe_count_with_context(

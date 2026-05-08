@@ -1,6 +1,7 @@
 mod consts;
 mod controller;
 mod dto;
+mod encoding;
 mod memory;
 mod service;
 
