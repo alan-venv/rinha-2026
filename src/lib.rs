@@ -1,8 +1,8 @@
 // COMMON
-pub const VECTOR_DIMENSIONS: usize = 14;
-pub const STORED_VECTOR_DIMENSIONS: usize = 16;
+pub const INPUT_VECTOR_DIMENSIONS: usize = 14;
+pub const VECTOR_DIMENSIONS: usize = 16;
 pub const VECTOR_SCALE: f32 = 10_000.0;
-pub const VECTOR_LEN: usize = STORED_VECTOR_DIMENSIONS * size_of::<i16>();
+pub const VECTOR_LEN: usize = VECTOR_DIMENSIONS * size_of::<i16>();
 pub type ReferenceVector = [i16; VECTOR_DIMENSIONS];
 pub const NEAREST_COUNT: usize = 5;
 

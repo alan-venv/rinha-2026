@@ -30,7 +30,10 @@ pub fn vectorization(request: ContentRequest) -> ReferenceVector {
     let n12 = f12(&merchant.mcc);
     let n13 = c(merchant.avg_amount / N[6]);
 
-    [n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13].map(q)
+    [
+        n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, 0.0, 0.0,
+    ]
+    .map(q)
 }
 
 fn c(x: f64) -> f32 {
