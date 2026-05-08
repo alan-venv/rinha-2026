@@ -15,6 +15,8 @@ pub struct FraudScoreDetails {
     pub probes_used: usize,
     #[allow(dead_code)]
     pub fallback_used: bool,
+    #[allow(dead_code)]
+    pub rescue_used: bool,
 }
 
 #[allow(dead_code)]
@@ -36,6 +38,7 @@ pub fn fraud_score_details(
         boundary_case: nearest_result.boundary_case,
         probes_used: nearest_result.probes_used,
         fallback_used: nearest_result.fallback_used,
+        rescue_used: nearest_result.rescue_used,
     }
 }
 
@@ -69,6 +72,7 @@ struct NearestResult {
     boundary_case: bool,
     probes_used: usize,
     fallback_used: bool,
+    rescue_used: bool,
 }
 
 impl NearestResult {
@@ -152,9 +156,11 @@ impl TopNearest {
 }
 
 fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> NearestResult {
+    let context = records.prepare_search_context(vector);
     let mut nearest = TopNearest::new();
     let current_worst_distance = Cell::new(u64::MAX);
     records.for_each_primary_candidate_batch(
+        &context,
         vector,
         0,
         IVF_INITIAL_PROBES,
@@ -175,12 +181,14 @@ fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) 
             boundary_case,
             probes_used: IVF_INITIAL_PROBES,
             fallback_used: false,
+            rescue_used: false,
         };
     }
 
     let mut fallback_nearest = TopNearest::new();
     let fallback_current_worst_distance = Cell::new(u64::MAX);
     let fallback_used = records.for_each_boundary_fallback_candidate(
+        &context,
         vector,
         &mut || fallback_current_worst_distance.get(),
         &mut |index, distance| {
@@ -191,17 +199,48 @@ fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) 
 
     if fallback_used {
         fallback_nearest.sort_candidates();
-        let boundary_case = is_boundary_case(
-            &fallback_nearest.candidates[..fallback_nearest.len],
-            records,
-        );
+        let fallback_candidates = &fallback_nearest.candidates[..fallback_nearest.len];
+        let fallback_score_candidates =
+            &fallback_candidates[..fallback_candidates.len().min(NEAREST_COUNT)];
+        let fallback_fraud_count = fraud_count(fallback_score_candidates, records);
+        let boundary_case = is_boundary_case(fallback_candidates, records);
+
+        if fallback_fraud_count == 3 {
+            let mut rescue_nearest = TopNearest::new();
+            let rescue_current_worst_distance = Cell::new(u64::MAX);
+            let rescue_used = records.for_each_boundary_rescue_candidate(
+                &context,
+                vector,
+                &mut || rescue_current_worst_distance.get(),
+                &mut |index, distance| {
+                    rescue_nearest.add(NearestCandidate { index, distance });
+                    rescue_current_worst_distance.set(rescue_nearest.current_worst_distance());
+                },
+            );
+
+            if rescue_used {
+                rescue_nearest.sort_candidates();
+                let boundary_case =
+                    is_boundary_case(&rescue_nearest.candidates[..rescue_nearest.len], records);
+
+                return NearestResult {
+                    candidates: rescue_nearest.candidates,
+                    len: rescue_nearest.len,
+                    boundary_case,
+                    probes_used: records.boundary_rescue_probe_count(),
+                    fallback_used: true,
+                    rescue_used: true,
+                };
+            }
+        }
 
         return NearestResult {
             candidates: fallback_nearest.candidates,
             len: fallback_nearest.len,
             boundary_case,
-            probes_used: BOUNDARY_FULL_SCAN_FINE_PROBES,
+            probes_used: records.boundary_fallback_probe_count(),
             fallback_used: true,
+            rescue_used: false,
         };
     }
 
@@ -211,6 +250,7 @@ fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) 
         boundary_case,
         probes_used: IVF_INITIAL_PROBES,
         fallback_used: false,
+        rescue_used: false,
     }
 }
 
@@ -364,6 +404,7 @@ mod tests {
 
         fn for_each_primary_candidate_batch<C, V>(
             &self,
+            _context: &crate::memory::SearchContext,
             _vector: &ReferenceVector,
             start_probe: usize,
             _end_probe: usize,

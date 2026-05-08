@@ -14,6 +14,7 @@ mod memory;
 mod service;
 
 use dto::ContentRequest;
+use memory::ReferenceSource;
 
 const MAX_ELAPSED_MS: u128 = 6_000;
 const MAX_BOUNDARY_CASE_PERCENTAGE: f64 = 10.0;
@@ -42,7 +43,8 @@ struct DiagnoseHierarchyConfig {
     coarse_centroids: usize,
     coarse_probes: usize,
     coarse_iterations: usize,
-    boundary_full_scan_fine_probes: usize,
+    boundary_coarse_group_probes: usize,
+    boundary_coarse_group_fine_probes: usize,
 }
 
 #[derive(Serialize)]
@@ -52,7 +54,8 @@ struct DiagnoseCore {
     hierarchy_build_elapsed_ms: u128,
     boundary_cases: usize,
     boundary_case_percentage: String,
-    boundary_full_centroid_fallbacks: usize,
+    boundary_fallbacks: usize,
+    boundary_rescue_fallbacks: usize,
     avg_probes_used: usize,
     max_probes_used: usize,
     decision_mismatches: usize,
@@ -93,7 +96,8 @@ fn main() -> Result<()> {
     let mut boundary_cases = 0;
     let mut boundary_decision_mismatches = 0;
     let mut primary_only_decision_mismatches = 0;
-    let mut boundary_full_centroid_fallbacks = 0;
+    let mut boundary_fallbacks = 0;
+    let mut boundary_rescue_fallbacks = 0;
     let mut probes_used = Vec::with_capacity(total);
     let mut primary_list_candidates = Vec::with_capacity(total);
     let mut coarse_centroid_candidates = Vec::with_capacity(total);
@@ -110,20 +114,41 @@ fn main() -> Result<()> {
 
     for entry in data.entries {
         let vector = service::vectorization(entry.request);
+        let context = references.prepare_search_context(&vector);
         let details = service::fraud_score_details(&vector, &references);
+        let primary = references.search_cost_for_probe_count_with_context(
+            &context,
+            &vector,
+            rinha::IVF_INITIAL_PROBES,
+        );
         let (cost, coarse_candidates, fine_candidates, total_units) = if details.fallback_used {
-            let fallback = references
-                .full_centroid_fallback_search_cost::<{ rinha::BOUNDARY_FULL_SCAN_FINE_PROBES }>(
-                    &vector,
-                );
-            (
-                fallback.search,
-                fallback.coarse_centroid_candidates,
-                fallback.fine_centroid_candidates,
-                fallback.total_units(),
-            )
+            let fallback = references.boundary_fallback_search_cost_with_context(&context, &vector);
+            let primary_with_fallback = add_search_cost(primary.search, fallback.search);
+            let primary_total_units = primary.total_units() + fallback.total_units();
+
+            if details.rescue_used {
+                let rescue = references.boundary_rescue_search_cost_with_context(&context, &vector);
+                let cost = add_search_cost(primary_with_fallback, rescue.search);
+                let total_units = primary_total_units + rescue.total_units();
+                (
+                    cost,
+                    primary.coarse_centroid_candidates
+                        + fallback.coarse_centroid_candidates
+                        + rescue.coarse_centroid_candidates,
+                    primary.fine_centroid_candidates
+                        + fallback.fine_centroid_candidates
+                        + rescue.fine_centroid_candidates,
+                    total_units,
+                )
+            } else {
+                (
+                    primary_with_fallback,
+                    primary.coarse_centroid_candidates + fallback.coarse_centroid_candidates,
+                    primary.fine_centroid_candidates + fallback.fine_centroid_candidates,
+                    primary_total_units,
+                )
+            }
         } else {
-            let primary = references.search_cost_for_probe_count(&vector, details.probes_used);
             (
                 primary.search,
                 primary.coarse_centroid_candidates,
@@ -149,7 +174,11 @@ fn main() -> Result<()> {
         probes_used.push(details.probes_used);
 
         if details.fallback_used {
-            boundary_full_centroid_fallbacks += 1;
+            boundary_fallbacks += 1;
+        }
+
+        if details.rescue_used {
+            boundary_rescue_fallbacks += 1;
         }
 
         if details.boundary_case {
@@ -174,7 +203,8 @@ fn main() -> Result<()> {
             coarse_centroids: hierarchy_config.coarse_centroids,
             coarse_probes: hierarchy_config.coarse_probes,
             coarse_iterations: hierarchy_config.coarse_iterations,
-            boundary_full_scan_fine_probes: hierarchy_config.boundary_full_scan_fine_probes,
+            boundary_coarse_group_probes: hierarchy_config.boundary_coarse_group_probes,
+            boundary_coarse_group_fine_probes: hierarchy_config.boundary_coarse_group_fine_probes,
         },
         core: DiagnoseCore {
             entries: total,
@@ -182,7 +212,8 @@ fn main() -> Result<()> {
             hierarchy_build_elapsed_ms: references.hierarchy_build_elapsed_ms(),
             boundary_cases,
             boundary_case_percentage: percentage(boundary_cases, total),
-            boundary_full_centroid_fallbacks,
+            boundary_fallbacks,
+            boundary_rescue_fallbacks,
             avg_probes_used: average(&probes_used),
             max_probes_used: probes_used.iter().copied().max().unwrap_or(0),
             decision_mismatches,
@@ -216,6 +247,24 @@ fn main() -> Result<()> {
     print_warnings(&output);
 
     Ok(())
+}
+
+fn add_search_cost(left: memory::SearchCost, right: memory::SearchCost) -> memory::SearchCost {
+    memory::SearchCost {
+        primary_list_candidates: left.primary_list_candidates + right.primary_list_candidates,
+        centroid_candidates: left.centroid_candidates + right.centroid_candidates,
+        centroid_early_discards: left.centroid_early_discards + right.centroid_early_discards,
+        centroid_full_distance_candidates: left.centroid_full_distance_candidates
+            + right.centroid_full_distance_candidates,
+        centroid_vector_dimensions_evaluated: left.centroid_vector_dimensions_evaluated
+            + right.centroid_vector_dimensions_evaluated,
+        flat_candidates: left.flat_candidates + right.flat_candidates,
+        flat_early_discards: left.flat_early_discards + right.flat_early_discards,
+        flat_full_distance_candidates: left.flat_full_distance_candidates
+            + right.flat_full_distance_candidates,
+        flat_vector_dimensions_evaluated: left.flat_vector_dimensions_evaluated
+            + right.flat_vector_dimensions_evaluated,
+    }
 }
 
 fn print_warnings(output: &DiagnoseOutput) {
