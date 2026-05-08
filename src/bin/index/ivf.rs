@@ -16,23 +16,22 @@ impl IndexIvf {
         Self::validate_config(dataset)?;
 
         let workers = thread::available_parallelism().map_or(1, usize::from);
-        let sample_count = IVF_SAMPLE_MULTIPLIER * IVF_CENTROIDS;
 
         println!(
             "building IVF_FLAT: references={}, centroids={}, sample={}, iterations={}, probes={}, workers={}",
             dataset.len(),
-            IVF_CENTROIDS,
-            sample_count,
-            IVF_ITERATIONS,
-            IVF_INITIAL_PROBES,
+            IVF_FINE_CENTROIDS,
+            IVF_FINE_SAMPLES,
+            IVF_FINE_ITERATIONS,
+            IVF_FINE_PROBES,
             workers,
         );
 
         let centroids = Self::train_centroids(
             dataset,
-            IVF_CENTROIDS,
-            sample_count,
-            IVF_ITERATIONS,
+            IVF_FINE_CENTROIDS,
+            IVF_FINE_SAMPLES,
+            IVF_FINE_ITERATIONS,
             workers,
         );
         let assignments = Self::assign_references(dataset, &centroids, workers);
@@ -60,19 +59,19 @@ impl IndexIvf {
     }
 
     fn validate_config(dataset: &ReferenceDataset) -> Result<()> {
-        if IVF_CENTROIDS > dataset.len() {
+        if IVF_FINE_CENTROIDS > dataset.len() {
             bail!(
                 "invalid centroid count: {} > {}",
-                IVF_CENTROIDS,
+                IVF_FINE_CENTROIDS,
                 dataset.len()
             );
         }
 
-        if IVF_INITIAL_PROBES == 0 || IVF_INITIAL_PROBES > IVF_CENTROIDS {
+        if IVF_FINE_PROBES == 0 || IVF_FINE_PROBES > IVF_FINE_CENTROIDS {
             bail!(
                 "invalid probe count: {} for {} centroids",
-                IVF_INITIAL_PROBES,
-                IVF_CENTROIDS
+                IVF_FINE_PROBES,
+                IVF_FINE_CENTROIDS
             );
         }
 

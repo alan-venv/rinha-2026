@@ -1,11 +1,7 @@
 use std::cell::Cell;
-use std::env;
-use std::sync::OnceLock;
 
 use crate::memory::ReferenceSource;
 use crate::*;
-
-static PRIMARY_PROBES: OnceLock<usize> = OnceLock::new();
 
 #[allow(dead_code)]
 pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> f32 {
@@ -41,8 +37,6 @@ struct NearestResult {
     len: usize,
     boundary_case: bool,
     probes_used: usize,
-    fallback_used: bool,
-    rescue_used: bool,
 }
 
 impl NearestResult {
@@ -129,12 +123,11 @@ fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) 
     let context = records.prepare_search_context(vector);
     let mut nearest = TopNearest::new();
     let current_worst_distance = Cell::new(u64::MAX);
-    let probe_count = primary_probe_count();
     records.for_each_primary_candidate_batch(
         &context,
         vector,
         0,
-        probe_count,
+        IVF_FINE_PROBES,
         &mut || current_worst_distance.get(),
         &mut |index, distance| {
             nearest.add(NearestCandidate { index, distance });
@@ -149,20 +142,8 @@ fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) 
         candidates: nearest.candidates,
         len: nearest.len,
         boundary_case,
-        probes_used: probe_count,
-        fallback_used: false,
-        rescue_used: false,
+        probes_used: IVF_FINE_PROBES,
     }
-}
-
-fn primary_probe_count() -> usize {
-    *PRIMARY_PROBES.get_or_init(|| {
-        env::var("PRIMARY_PROBES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(6)
-            .clamp(1, IVF_INITIAL_PROBES)
-    })
 }
 
 fn is_boundary_case(
@@ -185,10 +166,6 @@ pub struct FraudScoreDetails {
     pub boundary_case: bool,
     #[allow(dead_code)]
     pub probes_used: usize,
-    #[allow(dead_code)]
-    pub fallback_used: bool,
-    #[allow(dead_code)]
-    pub rescue_used: bool,
 }
 
 pub fn fraud_score_details(
@@ -201,8 +178,6 @@ pub fn fraud_score_details(
         score: score_from_nearest_result(&nearest_result, records),
         boundary_case: nearest_result.boundary_case,
         probes_used: nearest_result.probes_used,
-        fallback_used: nearest_result.fallback_used,
-        rescue_used: nearest_result.rescue_used,
     }
 }
 

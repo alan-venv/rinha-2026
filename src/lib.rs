@@ -11,16 +11,15 @@ pub const IVF_MAGIC: &[u8; 8] = b"R26IFL04";
 pub const IVF_HEADER_LEN: usize =
     IVF_MAGIC.len() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>();
 
-pub const IVF_ITERATIONS: usize = 80;
-pub const IVF_CENTROIDS: usize = 16384;
-pub const IVF_INITIAL_PROBES: usize = 12; // runtime-capped by PRIMARY_PROBES
-pub const IVF_SAMPLE_MULTIPLIER: usize = 64;
+pub const IVF_FINE_ITERATIONS: usize = 80;
+pub const IVF_FINE_CENTROIDS: usize = 16384;
+pub const IVF_FINE_SAMPLES: usize = 1_048_576;
+pub const IVF_FINE_PROBES: usize = 12;
 pub const SIMD_EARLY_DIMENSIONS: usize = 8;
-pub const BOUNDARY_COARSE_GROUP_PROBES: usize = 15; // 16 for safe reasons
-pub const BOUNDARY_COARSE_GROUP_FINE_PROBES: usize = 152; // 160 for safe reasons
-pub const HIERARCHY_COARSE_CENTROIDS: usize = 512;
-pub const HIERARCHY_COARSE_PROBES: usize = 8;
-pub const HIERARCHY_COARSE_ITERATIONS: usize = 6;
+pub const IVF_MAX_COARSE_PROBES: usize = 15; // 16 for safe reasons
+pub const IVF_COARSE_CENTROIDS: usize = 512;
+pub const IVF_COARSE_PROBES: usize = 8;
+pub const IVF_COARSE_ITERATIONS: usize = 6;
 
 pub mod controller;
 pub mod dto;
