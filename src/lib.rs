@@ -17,7 +17,7 @@ pub const IVF_COARSE_CENTROIDS: usize = 1024;
 pub const IVF_COARSE_ITERATIONS: usize = 6;
 
 pub const IVF_MAX_COARSE_PROBES: usize = 32;
-pub const IVF_COARSE_PROBES: usize = 15;
+pub const IVF_COARSE_PROBES: usize = 16;
 pub const IVF_FINE_PROBES: usize = 12;
 
 pub mod controller;
