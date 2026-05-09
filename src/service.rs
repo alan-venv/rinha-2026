@@ -3,7 +3,6 @@ use std::cell::Cell;
 use crate::memory::ReferenceSource;
 use crate::*;
 
-#[allow(dead_code)]
 pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> f32 {
     fraud_score_details(vector, records).score
 }
@@ -36,7 +35,6 @@ struct NearestResult {
     candidates: [NearestCandidate; NEAREST_COUNT],
     len: usize,
     boundary_case: bool,
-    probes_used: usize,
 }
 
 impl NearestResult {
@@ -119,15 +117,17 @@ impl TopNearest {
     }
 }
 
-fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> NearestResult {
-    let context = records.prepare_search_context(vector);
+fn nearest(
+    vector: &ReferenceVector,
+    records: &(impl ReferenceSource + ?Sized),
+    probes: usize,
+) -> NearestResult {
     let mut nearest = TopNearest::new();
     let current_worst_distance = Cell::new(u64::MAX);
     records.for_each_primary_candidate_batch(
-        &context,
         vector,
         0,
-        IVF_FINE_PROBES,
+        probes,
         &mut || current_worst_distance.get(),
         &mut |index, distance| {
             nearest.add(NearestCandidate { index, distance });
@@ -142,7 +142,6 @@ fn nearest(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) 
         candidates: nearest.candidates,
         len: nearest.len,
         boundary_case,
-        probes_used: IVF_FINE_PROBES,
     }
 }
 
@@ -162,22 +161,23 @@ fn is_boundary_case(
 
 pub struct FraudScoreDetails {
     pub score: f32,
-    #[allow(dead_code)]
     pub boundary_case: bool,
-    #[allow(dead_code)]
-    pub probes_used: usize,
 }
 
 pub fn fraud_score_details(
     vector: &ReferenceVector,
     records: &(impl ReferenceSource + ?Sized),
 ) -> FraudScoreDetails {
-    let nearest_result = nearest(vector, records);
+    let fast_result = nearest(vector, records, IVF_FAST_PROBES);
+    let nearest_result = if fast_result.boundary_case {
+        nearest(vector, records, IVF_FINE_PROBES)
+    } else {
+        fast_result
+    };
 
     FraudScoreDetails {
         score: score_from_nearest_result(&nearest_result, records),
         boundary_case: nearest_result.boundary_case,
-        probes_used: nearest_result.probes_used,
     }
 }
 
@@ -218,7 +218,6 @@ mod tests {
 
         fn for_each_primary_candidate_batch<C, V>(
             &self,
-            _context: &crate::memory::SearchContext,
             _vector: &ReferenceVector,
             start_probe: usize,
             _end_probe: usize,
@@ -269,7 +268,7 @@ mod tests {
         ];
 
         assert_eq!(
-            nearest(&query, &records)
+            nearest(&query, &records, IVF_FINE_PROBES)
                 .candidates()
                 .iter()
                 .take(NEAREST_COUNT)
@@ -427,7 +426,7 @@ mod tests {
         };
 
         assert_eq!(
-            nearest(&query, &records)
+            nearest(&query, &records, IVF_FINE_PROBES)
                 .candidates()
                 .iter()
                 .map(|candidate| candidate.index)
