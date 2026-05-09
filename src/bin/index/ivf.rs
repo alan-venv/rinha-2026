@@ -50,8 +50,9 @@ impl IndexIvf {
             IVF_HEADER_LEN
                 + centroids.len() * VECTOR_LEN
                 + assignments.offsets.len() * size_of::<u32>()
-                + indices.len() * size_of::<u32>()
-                + dataset.len() * VECTOR_LEN
+                + assignments.offsets.len() * size_of::<u32>()
+                + Self::block_count(&assignments.offsets) * 8 * VECTOR_LEN
+                + Self::block_count(&assignments.offsets) * 8 * size_of::<u32>()
                 + dataset.fraud_bits().len()
         );
 
@@ -340,10 +341,14 @@ impl IndexIvf {
     ) -> Result<()> {
         let output_file = File::create(output)?;
         let mut writer = BufWriter::new(output_file);
+        let block_offsets = Self::block_offsets(offsets);
+        let block_count = *block_offsets.last().unwrap_or(&0);
+
         writer.write_all(IVF_MAGIC)?;
         writer.write_all(&(dataset.len() as u64).to_le_bytes())?;
         writer.write_all(&(centroids.len() as u32).to_le_bytes())?;
         writer.write_all(&(indices.len() as u64).to_le_bytes())?;
+        writer.write_all(&(u64::from(block_count)).to_le_bytes())?;
 
         for centroid in centroids {
             Self::write_vector(&mut writer, centroid)?;
@@ -353,12 +358,38 @@ impl IndexIvf {
             writer.write_all(&offset.to_le_bytes())?;
         }
 
-        for index in indices {
-            writer.write_all(&index.to_le_bytes())?;
+        for offset in &block_offsets {
+            writer.write_all(&offset.to_le_bytes())?;
         }
 
-        for vector in &dataset.vectors {
-            Self::write_vector(&mut writer, vector)?;
+        for centroid in 0..centroids.len() {
+            let start = offsets[centroid] as usize;
+            let end = offsets[centroid + 1] as usize;
+
+            for chunk in indices[start..end].chunks(8) {
+                let mut lanes = [[0_i16; VECTOR_DIMENSIONS]; 8];
+
+                for (lane, index) in chunk.iter().copied().enumerate() {
+                    lanes[lane] = dataset.vector_at(index as usize);
+                    for value in lanes[lane] {
+                        debug_assert!((-10_000..=10_000).contains(&value));
+                    }
+                }
+
+                Self::write_block_vectors(&mut writer, &lanes)?;
+            }
+        }
+
+        for centroid in 0..centroids.len() {
+            let start = offsets[centroid] as usize;
+            let end = offsets[centroid + 1] as usize;
+
+            for chunk in indices[start..end].chunks(8) {
+                for lane in 0..8 {
+                    let index = chunk.get(lane).copied().unwrap_or(u32::MAX);
+                    writer.write_all(&index.to_le_bytes())?;
+                }
+            }
         }
 
         writer.write_all(dataset.fraud_bits())?;
@@ -372,5 +403,34 @@ impl IndexIvf {
         }
 
         Ok(())
+    }
+
+    fn write_block_vectors(
+        writer: &mut BufWriter<File>,
+        lanes: &[[i16; VECTOR_DIMENSIONS]; 8],
+    ) -> Result<()> {
+        for pair in 0..VECTOR_DIMENSIONS / 2 {
+            for lane in lanes {
+                writer.write_all(&lane[pair * 2].to_le_bytes())?;
+                writer.write_all(&lane[pair * 2 + 1].to_le_bytes())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn block_offsets(offsets: &[u32]) -> Vec<u32> {
+        let mut block_offsets = vec![0_u32; offsets.len()];
+
+        for centroid in 0..offsets.len() - 1 {
+            let count = offsets[centroid + 1] - offsets[centroid];
+            block_offsets[centroid + 1] = block_offsets[centroid] + count.div_ceil(8);
+        }
+
+        block_offsets
+    }
+
+    fn block_count(offsets: &[u32]) -> usize {
+        Self::block_offsets(offsets).last().copied().unwrap_or(0) as usize
     }
 }
