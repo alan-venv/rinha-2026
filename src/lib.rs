@@ -14,7 +14,7 @@ pub const IVF_FINE_CENTROIDS: usize = 4096;
 pub const IVF_FINE_ITERATIONS: usize = 200;
 
 pub const IVF_INITIAL_PROBES: usize = 2; // 8 = safe
-pub const IVF_MAX_PROBES: usize = 24;
+pub const IVF_MAX_PROBES: usize = 24; // 32 = safe
 
 pub mod controller;
 pub mod dto;
