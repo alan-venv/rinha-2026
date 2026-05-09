@@ -1,6 +1,7 @@
 ## Fluxo Runtime
 
-- O índice `resources/ivf.bin` é embutido no binário via `include_bytes!` e copiado para heap no startup; o runtime não lê arquivo de índice.
+- O índice é lido no startup a partir de `resources/ivf.bin`.
+- O arquivo do índice é acessado via `memmap2`; o runtime não copia o índice inteiro para heap.
 
 1. A request é desserializada.
 2. A transação é normalizada em vetor quantizado de 16 dimensões.

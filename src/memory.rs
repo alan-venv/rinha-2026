@@ -1,14 +1,11 @@
-use std::env;
 use std::fs::File;
 use std::ops::Range;
-use std::path::Path;
 use std::time::Instant;
 
-use crate::*;
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 
-const IVF_PATH: &str = "resources/ivf.bin";
+use crate::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReferenceRecord {
@@ -625,7 +622,7 @@ impl CentroidHierarchy {
 impl IvfIndexes {
     fn load() -> Result<Self> {
         Ok(Self {
-            primary: IvfIndex::load("IVF_PATH", IVF_PATH, None)?,
+            primary: IvfIndex::load("resources/ivf.bin", None)?,
         })
     }
 
@@ -642,9 +639,8 @@ fn apply_centroid_search_cost(search: &mut SearchCost, cost: CentroidSearchCost)
 }
 
 impl IvfIndex {
-    fn load(env_key: &str, default_path: &str, reference_count: Option<usize>) -> Result<Self> {
-        let path = env::var(env_key).unwrap_or_else(|_| default_path.to_string());
-        let input_file = File::open(Path::new(&path))
+    fn load(path: &str, reference_count: Option<usize>) -> Result<Self> {
+        let input_file = File::open(path)
             .with_context(|| format!("failed to open required IVF index at {path}"))?;
         let mmap = unsafe { Mmap::map(&input_file) }?;
         let layout = IvfLayout::read(&mmap, reference_count)?;
