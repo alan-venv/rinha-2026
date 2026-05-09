@@ -1,6 +1,6 @@
-use chrono::{Datelike, Timelike};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 
-use crate::dto::{ContentRequest, LastTransaction, Transaction};
+use crate::dto::{ContentRequest, LastTransaction};
 use crate::*;
 
 const N: [f64; 7] = [10000.0, 12.0, 10.0, 1440.0, 1000.0, 20.0, 10000.0];
@@ -15,25 +15,106 @@ pub fn vectorization(request: ContentRequest) -> ReferenceVector {
     let merchant = &request.merchant;
     let terminal = &request.terminal;
 
-    let n0 = c(transaction.amount / N[0]);
-    let n1 = c(transaction.installments / N[1]);
-    let n2 = c((transaction.amount / customer.avg_amount) / N[2]);
-    let n3 = transaction.requested_at.hour() as f32 / 23.0;
-    let n4 = transaction.requested_at.weekday().num_days_from_monday() as f32 / 6.0;
-    let n5 = f5(transaction, last_transaction);
-    let n6 = f6(last_transaction);
-    let n7 = c(terminal.km_from_home / N[4]);
-    let n8 = c(customer.tx_count_24h / N[5]);
-    let n9 = terminal.is_online as u8 as f32;
-    let n10 = terminal.card_present as u8 as f32;
-    let n11 = f11(&customer.known_merchants, &merchant.id);
-    let n12 = f12(&merchant.mcc);
-    let n13 = c(merchant.avg_amount / N[6]);
+    let n0 = n0(transaction.amount);
+    let n1 = n1(transaction.installments);
+    let n2 = n2(transaction.amount, customer.avg_amount);
+    let n3 = n3(&transaction.requested_at);
+    let n4 = n4(&transaction.requested_at);
+    let n5 = n5(&transaction.requested_at, last_transaction);
+    let n6 = n6(last_transaction);
+    let n7 = n7(terminal.km_from_home);
+    let n8 = n8(customer.tx_count_24h);
+    let n9 = n9(terminal.is_online);
+    let n10 = n10(terminal.card_present);
+    let n11 = n11(&customer.known_merchants, &merchant.id);
+    let n12 = n12(&merchant.mcc);
+    let n13 = n13(merchant.avg_amount);
+    let n14 = n14();
+    let n15 = n15();
 
     [
-        n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, 0.0, 0.0,
+        n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n15,
     ]
     .map(q)
+}
+
+fn n0(amount: f64) -> f32 {
+    c(amount / N[0])
+}
+
+fn n1(installments: f64) -> f32 {
+    c(installments / N[1])
+}
+
+fn n2(amount: f64, avg_amount: f64) -> f32 {
+    c((amount / avg_amount) / N[2])
+}
+
+fn n3(requested_at: &DateTime<Utc>) -> f32 {
+    requested_at.hour() as f32 / 23.0
+}
+
+fn n4(requested_at: &DateTime<Utc>) -> f32 {
+    requested_at.weekday().num_days_from_monday() as f32 / 6.0
+}
+
+fn n5(requested_at: &DateTime<Utc>, last_transaction: &Option<LastTransaction>) -> f32 {
+    last_transaction.as_ref().map_or(-1.0, |last_transaction| {
+        c(requested_at
+            .signed_duration_since(last_transaction.timestamp)
+            .num_minutes()
+            .max(0) as f64
+            / N[3])
+    })
+}
+
+fn n6(last_transaction: &Option<LastTransaction>) -> f32 {
+    last_transaction
+        .as_ref()
+        .map_or(-1.0, |last_transaction| n7(last_transaction.km_from_current))
+}
+
+fn n7(km_from_home: f64) -> f32 {
+    c(km_from_home / N[4])
+}
+
+fn n8(tx_count_24h: f64) -> f32 {
+    c(tx_count_24h / N[5])
+}
+
+fn n9(is_online: bool) -> f32 {
+    is_online as u8 as f32
+}
+
+fn n10(card_present: bool) -> f32 {
+    card_present as u8 as f32
+}
+
+fn n11(known_merchants: &[String], merchant_id: &str) -> f32 {
+    (!known_merchants.iter().any(|known| known == merchant_id)) as u8 as f32
+}
+
+fn n12(mcc: &str) -> f32 {
+    let Ok(mcc) = mcc.parse::<u16>() else {
+        return R0;
+    };
+
+    match RK.binary_search(&mcc) {
+        Ok(index) => RV[index],
+        Err(_) => R0,
+    }
+}
+
+fn n13(avg_amount: f64) -> f32 {
+    c(avg_amount / N[6])
+}
+
+fn n14() -> f32 {
+    0.0
+}
+
+fn n15() -> f32 {
+    0.0
 }
 
 fn c(x: f64) -> f32 {
@@ -44,39 +125,10 @@ fn q(x: f32) -> i16 {
     (x * 10_000.0).round() as i16
 }
 
-fn f5(t: &Transaction, l: &Option<LastTransaction>) -> f32 {
-    l.as_ref().map_or(-1.0, |x| {
-        c(t.requested_at
-            .signed_duration_since(x.timestamp)
-            .num_minutes()
-            .max(0) as f64
-            / N[3])
-    })
-}
-
-fn f6(x: &Option<LastTransaction>) -> f32 {
-    x.as_ref().map_or(-1.0, |y| c(y.km_from_current / N[4]))
-}
-
-fn f11(xs: &[String], x: &str) -> f32 {
-    (!xs.iter().any(|y| y == x)) as u8 as f32
-}
-
-fn f12(x: &str) -> f32 {
-    let Ok(x) = x.parse::<u16>() else {
-        return R0;
-    };
-
-    match RK.binary_search(&x) {
-        Ok(i) => RV[i],
-        Err(_) => R0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::{Customer, Merchant};
+    use crate::dto::{Customer, Merchant, Transaction};
     use chrono::{DateTime, TimeZone, Utc};
 
     fn utc(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> DateTime<Utc> {
@@ -144,7 +196,7 @@ mod tests {
         };
 
         assert_eq!(
-            f5(&transaction, &Some(last_transaction)),
+            n5(&transaction.requested_at, &Some(last_transaction)),
             (325.0 / N[3]) as f32
         );
     }
@@ -153,7 +205,7 @@ mod tests {
     fn returns_minus_one_when_last_transaction_is_missing() {
         let transaction = transaction(utc(2026, 3, 11, 20, 23, 35));
 
-        assert_eq!(f5(&transaction, &None), -1.0);
+        assert_eq!(n5(&transaction.requested_at, &None), -1.0);
     }
 
     #[test]
@@ -164,7 +216,7 @@ mod tests {
             km_from_current: 0.0,
         };
 
-        assert_eq!(f5(&transaction, &Some(last_transaction)), 0.0);
+        assert_eq!(n5(&transaction.requested_at, &Some(last_transaction)), 0.0);
     }
 
     #[test]
@@ -174,7 +226,7 @@ mod tests {
             km_from_current: 250.0,
         };
 
-        assert_eq!(f6(&Some(last_transaction)), 0.25);
+        assert_eq!(n6(&Some(last_transaction)), 0.25);
     }
 
     #[test]
@@ -184,12 +236,12 @@ mod tests {
             km_from_current: 2_000.0,
         };
 
-        assert_eq!(f6(&Some(last_transaction)), 1.0);
+        assert_eq!(n6(&Some(last_transaction)), 1.0);
     }
 
     #[test]
     fn returns_minus_one_when_last_transaction_km_is_missing() {
-        assert_eq!(f6(&None), -1.0);
+        assert_eq!(n6(&None), -1.0);
     }
 
     #[test]
@@ -197,7 +249,7 @@ mod tests {
         let customer = customer(vec!["MERC-001".to_string()]);
         let merchant = merchant("MERC-001");
 
-        assert_eq!(f11(&customer.known_merchants, &merchant.id), 0.0);
+        assert_eq!(n11(&customer.known_merchants, &merchant.id), 0.0);
     }
 
     #[test]
@@ -205,7 +257,7 @@ mod tests {
         let customer = customer(vec!["MERC-001".to_string()]);
         let merchant = merchant("MERC-002");
 
-        assert_eq!(f11(&customer.known_merchants, &merchant.id), 1.0);
+        assert_eq!(n11(&customer.known_merchants, &merchant.id), 1.0);
     }
 
     #[test]
@@ -215,13 +267,13 @@ mod tests {
 
     #[test]
     fn finds_known_mcc_risk() {
-        assert_eq!(f12("7995"), 0.85);
-        assert_eq!(f12("5411"), 0.15);
+        assert_eq!(n12("7995"), 0.85);
+        assert_eq!(n12("5411"), 0.15);
     }
 
     #[test]
     fn uses_default_for_unknown_or_invalid_mcc() {
-        assert_eq!(f12("0000"), R0);
-        assert_eq!(f12("invalid"), R0);
+        assert_eq!(n12("0000"), R0);
+        assert_eq!(n12("invalid"), R0);
     }
 }
