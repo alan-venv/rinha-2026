@@ -340,7 +340,7 @@ impl IvfIndex {
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
-        let mut nearest = TopCentroids::<IVF_FINE_PROBES>::new();
+        let mut nearest = TopCentroids::<IVF_MAX_PROBES>::new();
 
         for centroid in 0..self.centroid_count {
             let limit = nearest.current_worst_distance();

@@ -23,7 +23,7 @@ impl IndexIvf {
             IVF_FINE_CENTROIDS,
             IVF_FINE_SAMPLES,
             IVF_FINE_ITERATIONS,
-            IVF_FINE_PROBES,
+            IVF_MAX_PROBES,
             workers,
         );
 
@@ -68,10 +68,10 @@ impl IndexIvf {
             );
         }
 
-        if IVF_FINE_PROBES == 0 || IVF_FINE_PROBES > IVF_FINE_CENTROIDS {
+        if IVF_MAX_PROBES == 0 || IVF_MAX_PROBES > IVF_FINE_CENTROIDS {
             bail!(
                 "invalid probe count: {} for {} centroids",
-                IVF_FINE_PROBES,
+                IVF_MAX_PROBES,
                 IVF_FINE_CENTROIDS
             );
         }

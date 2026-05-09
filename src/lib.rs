@@ -11,10 +11,10 @@ pub const IVF_HEADER_LEN: usize =
 
 pub const IVF_FINE_SAMPLES: usize = 3_000_000;
 pub const IVF_FINE_CENTROIDS: usize = 4096;
-pub const IVF_FINE_ITERATIONS: usize = 25;
+pub const IVF_FINE_ITERATIONS: usize = 200;
 
-pub const IVF_FAST_PROBES: usize = 8;
-pub const IVF_FINE_PROBES: usize = 24;
+pub const IVF_INITIAL_PROBES: usize = 2; // 8 = safe
+pub const IVF_MAX_PROBES: usize = 24;
 
 pub mod controller;
 pub mod dto;

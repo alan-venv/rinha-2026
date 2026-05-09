@@ -168,16 +168,16 @@ pub fn fraud_score_details(
     vector: &ReferenceVector,
     records: &(impl ReferenceSource + ?Sized),
 ) -> FraudScoreDetails {
-    let fast_result = nearest(vector, records, IVF_FAST_PROBES);
-    let nearest_result = if fast_result.boundary_case {
-        nearest(vector, records, IVF_FINE_PROBES)
+    let initial_result = nearest(vector, records, IVF_INITIAL_PROBES);
+    let final_result = if initial_result.boundary_case {
+        nearest(vector, records, IVF_MAX_PROBES)
     } else {
-        fast_result
+        initial_result
     };
 
     FraudScoreDetails {
-        score: score_from_nearest_result(&nearest_result, records),
-        boundary_case: nearest_result.boundary_case,
+        score: score_from_nearest_result(&final_result, records),
+        boundary_case: final_result.boundary_case,
     }
 }
 
@@ -268,7 +268,7 @@ mod tests {
         ];
 
         assert_eq!(
-            nearest(&query, &records, IVF_FINE_PROBES)
+            nearest(&query, &records, IVF_MAX_PROBES)
                 .candidates()
                 .iter()
                 .take(NEAREST_COUNT)
@@ -426,7 +426,7 @@ mod tests {
         };
 
         assert_eq!(
-            nearest(&query, &records, IVF_FINE_PROBES)
+            nearest(&query, &records, IVF_MAX_PROBES)
                 .candidates()
                 .iter()
                 .map(|candidate| candidate.index)
