@@ -9,7 +9,7 @@ pub const IVF_MAGIC: &[u8; 8] = b"R26IFL04";
 pub const IVF_HEADER_LEN: usize =
     IVF_MAGIC.len() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>();
 
-pub const IVF_FINE_SAMPLES: usize = 2_097_152;
+pub const IVF_FINE_SAMPLES: usize = 3_000_000;
 pub const IVF_FINE_CENTROIDS: usize = 32768;
 pub const IVF_FINE_ITERATIONS: usize = 80;
 
