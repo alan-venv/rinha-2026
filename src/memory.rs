@@ -12,11 +12,41 @@ pub struct ReferenceRecord {
     pub is_fraud: bool,
 }
 
+pub struct SearchContext {
+    coarse_indexes: [usize; IVF_MAX_COARSE_PROBES],
+    coarse_len: usize,
+}
+
+impl SearchContext {
+    pub fn empty() -> Self {
+        Self {
+            coarse_indexes: [0; IVF_MAX_COARSE_PROBES],
+            coarse_len: 0,
+        }
+    }
+
+    fn from_coarse_selection(selection: TopCentroids<IVF_MAX_COARSE_PROBES>) -> Self {
+        Self {
+            coarse_indexes: selection.indexes,
+            coarse_len: selection.len,
+        }
+    }
+
+    fn coarse_indexes(&self, limit: usize) -> &[usize] {
+        &self.coarse_indexes[..self.coarse_len.min(limit)]
+    }
+}
+
 pub trait ReferenceSource {
     fn is_fraud(&self, index: usize) -> bool;
 
+    fn prepare_search_context(&self, _vector: &ReferenceVector) -> SearchContext {
+        SearchContext::empty()
+    }
+
     fn for_each_primary_candidate_batch<C, V>(
         &self,
+        context: &SearchContext,
         vector: &ReferenceVector,
         start_probe: usize,
         end_probe: usize,
@@ -29,12 +59,14 @@ pub trait ReferenceSource {
 
 pub struct IndexedReferences {
     ivfs: IvfIndexes,
+    hierarchy: CentroidHierarchy,
 }
 
 pub fn load_references() -> Result<IndexedReferences> {
     let ivfs = IvfIndexes::load()?;
+    let hierarchy = ivfs.primary.build_centroid_hierarchy();
 
-    Ok(IndexedReferences { ivfs })
+    Ok(IndexedReferences { ivfs, hierarchy })
 }
 
 fn read_u32_at(bytes: &[u8], offset: usize) -> u32 {
@@ -54,8 +86,16 @@ impl ReferenceSource for IndexedReferences {
         self.ivfs.is_fraud(index)
     }
 
+    fn prepare_search_context(&self, vector: &ReferenceVector) -> SearchContext {
+        SearchContext::from_coarse_selection(
+            self.hierarchy
+                .select_coarse_centroids::<{ IVF_MAX_COARSE_PROBES }>(vector),
+        )
+    }
+
     fn for_each_primary_candidate_batch<C, V>(
         &self,
+        context: &SearchContext,
         vector: &ReferenceVector,
         start_probe: usize,
         end_probe: usize,
@@ -65,7 +105,9 @@ impl ReferenceSource for IndexedReferences {
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
-        self.ivfs.primary.for_each_direct_candidate_batch(
+        self.ivfs.primary.for_each_hierarchy_candidate_batch(
+            &self.hierarchy,
+            context,
             vector,
             start_probe..end_probe,
             current_worst_top_distance,
@@ -81,6 +123,7 @@ impl ReferenceSource for [ReferenceRecord] {
 
     fn for_each_primary_candidate_batch<C, V>(
         &self,
+        _context: &SearchContext,
         vector: &ReferenceVector,
         start_probe: usize,
         _end_probe: usize,
@@ -112,6 +155,7 @@ impl<const N: usize> ReferenceSource for [ReferenceRecord; N] {
 
     fn for_each_primary_candidate_batch<C, V>(
         &self,
+        context: &SearchContext,
         vector: &ReferenceVector,
         start_probe: usize,
         end_probe: usize,
@@ -122,6 +166,7 @@ impl<const N: usize> ReferenceSource for [ReferenceRecord; N] {
         V: FnMut(usize, u64),
     {
         self.as_slice().for_each_primary_candidate_batch(
+            context,
             vector,
             start_probe,
             end_probe,
@@ -258,6 +303,58 @@ impl<const N: usize> TopCentroids<N> {
     }
 }
 
+pub struct CentroidHierarchy {
+    coarse_centroids: Vec<ReferenceVector>,
+    offsets: Vec<u32>,
+    fine_centroids: Vec<u32>,
+}
+
+impl CentroidHierarchy {
+    fn select_coarse_centroids<const N: usize>(&self, vector: &ReferenceVector) -> TopCentroids<N> {
+        let mut nearest = TopCentroids::<N>::new();
+
+        for (coarse, centroid) in self.coarse_centroids.iter().enumerate() {
+            let limit = nearest.current_worst_distance();
+            let distance = distance2_limited(vector, centroid, limit);
+
+            if is_candidate_distance_useful(distance, limit) {
+                nearest.add(coarse, distance);
+            }
+        }
+
+        nearest.sort_indexes();
+        nearest
+    }
+
+    fn select_top_fine_centroids<const N: usize>(
+        &self,
+        index: &IvfIndex,
+        context: &SearchContext,
+        vector: &ReferenceVector,
+    ) -> TopCentroids<N> {
+        let mut nearest = TopCentroids::<N>::new();
+
+        for coarse in context.coarse_indexes(IVF_COARSE_PROBES).iter().copied() {
+            let start = self.offsets[coarse] as usize;
+            let end = self.offsets[coarse + 1] as usize;
+
+            for position in start..end {
+                let fine = self.fine_centroids[position] as usize;
+                let limit = nearest.current_worst_distance();
+                let distance =
+                    distance2_ptr_limited(index.centroid_vector_ptr(fine), vector, limit);
+
+                if is_candidate_distance_useful(distance, limit) {
+                    nearest.add(fine, distance);
+                }
+            }
+        }
+
+        nearest.sort_indexes();
+        nearest
+    }
+}
+
 struct IvfIndex {
     mmap: Mmap,
     reference_count: usize,
@@ -310,8 +407,10 @@ impl IvfIndex {
         byte & (1 << (index % 8)) != 0
     }
 
-    fn for_each_direct_candidate_batch<C, V>(
+    fn for_each_hierarchy_candidate_batch<C, V>(
         &self,
+        hierarchy: &CentroidHierarchy,
+        context: &SearchContext,
         vector: &ReferenceVector,
         probe_range: Range<usize>,
         current_worst_top_distance: &mut C,
@@ -320,18 +419,7 @@ impl IvfIndex {
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
-        let mut nearest = TopCentroids::<IVF_MAX_PROBES>::new();
-
-        for centroid in 0..self.centroid_count {
-            let limit = nearest.current_worst_distance();
-            let distance = distance2_ptr_limited(self.centroid_vector_ptr(centroid), vector, limit);
-
-            if is_candidate_distance_useful(distance, limit) {
-                nearest.add(centroid, distance);
-            }
-        }
-
-        nearest.sort_indexes();
+        let nearest = hierarchy.select_top_fine_centroids::<IVF_FINE_PROBES>(self, context, vector);
         let start = probe_range.start.min(nearest.len);
         let end = probe_range.end.min(nearest.len);
 
@@ -345,6 +433,70 @@ impl IvfIndex {
             current_worst_top_distance,
             visit,
         );
+    }
+
+    fn build_centroid_hierarchy(&self) -> CentroidHierarchy {
+        let fine_centroid_vectors = (0..self.centroid_count)
+            .map(|centroid| self.centroid_vector_at(centroid))
+            .collect::<Vec<_>>();
+        let coarse_count = IVF_COARSE_CENTROIDS.min(fine_centroid_vectors.len()).max(1);
+        let mut coarse_centroids = initial_sampled_centroids(&fine_centroid_vectors, coarse_count);
+
+        for _ in 0..IVF_COARSE_ITERATIONS {
+            let mut sums = vec![[0_i64; VECTOR_DIMENSIONS]; coarse_count];
+            let mut counts = vec![0_u32; coarse_count];
+
+            for vector in &fine_centroid_vectors {
+                let coarse = nearest_vector_index(&coarse_centroids, vector);
+                counts[coarse] += 1;
+
+                for (sum, value) in sums[coarse].iter_mut().zip(vector) {
+                    *sum += i64::from(*value);
+                }
+            }
+
+            for coarse in 0..coarse_count {
+                let count = counts[coarse];
+
+                if count == 0 {
+                    continue;
+                }
+
+                for dimension in 0..VECTOR_DIMENSIONS {
+                    coarse_centroids[coarse][dimension] =
+                        (sums[coarse][dimension] / i64::from(count)) as i16;
+                }
+            }
+        }
+
+        let mut assignments = Vec::with_capacity(fine_centroid_vectors.len());
+        let mut counts = vec![0_u32; coarse_count];
+
+        for vector in &fine_centroid_vectors {
+            let coarse = nearest_vector_index(&coarse_centroids, vector);
+            assignments.push(coarse);
+            counts[coarse] += 1;
+        }
+
+        let mut offsets = vec![0_u32; coarse_count + 1];
+        for coarse in 0..coarse_count {
+            offsets[coarse + 1] = offsets[coarse] + counts[coarse];
+        }
+
+        let mut cursors = offsets[..coarse_count].to_vec();
+        let mut fine_centroids = vec![0_u32; fine_centroid_vectors.len()];
+
+        for (fine, coarse) in assignments.into_iter().enumerate() {
+            let cursor = &mut cursors[coarse];
+            fine_centroids[*cursor as usize] = fine as u32;
+            *cursor += 1;
+        }
+
+        CentroidHierarchy {
+            coarse_centroids,
+            offsets,
+            fine_centroids,
+        }
     }
 
     fn for_each_candidates_from_centroids<C, V>(
@@ -390,6 +542,10 @@ impl IvfIndex {
         self.centroids_offset + centroid * VECTOR_LEN
     }
 
+    fn centroid_vector_at(&self, centroid: usize) -> ReferenceVector {
+        vector_mmap_at(&self.mmap, self.centroid_vector_offset(centroid))
+    }
+
     fn centroid_vector_ptr(&self, centroid: usize) -> *const i16 {
         unsafe {
             self.mmap
@@ -420,6 +576,47 @@ impl IvfIndex {
                 .cast::<i16>()
         }
     }
+}
+
+fn initial_sampled_centroids(
+    vectors: &[ReferenceVector],
+    centroid_count: usize,
+) -> Vec<ReferenceVector> {
+    let mut centroids = Vec::with_capacity(centroid_count);
+
+    for centroid in 0..centroid_count {
+        let index = centroid * vectors.len() / centroid_count;
+        centroids.push(vectors[index]);
+    }
+
+    centroids
+}
+
+fn nearest_vector_index(centroids: &[ReferenceVector], vector: &ReferenceVector) -> usize {
+    let mut nearest = 0;
+    let mut nearest_distance = u64::MAX;
+
+    for (index, centroid) in centroids.iter().enumerate() {
+        let distance = distance2_limited(vector, centroid, nearest_distance);
+
+        if distance < nearest_distance {
+            nearest = index;
+            nearest_distance = distance;
+        }
+    }
+
+    nearest
+}
+
+fn vector_mmap_at(mmap: &Mmap, offset: usize) -> ReferenceVector {
+    let reference = unsafe { mmap.as_ptr().add(offset).cast::<i16>() };
+    let mut vector = [0; VECTOR_DIMENSIONS];
+
+    for (dimension, value) in vector.iter_mut().enumerate() {
+        *value = i16::from_le(unsafe { *reference.add(dimension) });
+    }
+
+    vector
 }
 
 fn distance2_ptr_limited(reference: *const i16, vector: &ReferenceVector, limit: u64) -> u64 {

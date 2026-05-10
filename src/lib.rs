@@ -13,8 +13,12 @@ pub const IVF_FINE_SAMPLES: usize = 3_000_000;
 pub const IVF_FINE_CENTROIDS: usize = 4096;
 pub const IVF_FINE_ITERATIONS: usize = 200;
 
-pub const IVF_INITIAL_PROBES: usize = 2;
-pub const IVF_MAX_PROBES: usize = 8;
+pub const IVF_COARSE_CENTROIDS: usize = 64;
+pub const IVF_COARSE_ITERATIONS: usize = 8;
+
+pub const IVF_MAX_COARSE_PROBES: usize = 48;
+pub const IVF_COARSE_PROBES: usize = 32;
+pub const IVF_FINE_PROBES: usize = 2;
 
 pub mod controller;
 pub mod dto;

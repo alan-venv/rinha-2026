@@ -122,9 +122,11 @@ fn nearest(
     records: &(impl ReferenceSource + ?Sized),
     probes: usize,
 ) -> NearestResult {
+    let context = records.prepare_search_context(vector);
     let mut nearest = TopNearest::new();
     let current_worst_distance = Cell::new(u64::MAX);
     records.for_each_primary_candidate_batch(
+        &context,
         vector,
         0,
         probes,
@@ -168,9 +170,9 @@ pub fn fraud_score_details(
     vector: &ReferenceVector,
     records: &(impl ReferenceSource + ?Sized),
 ) -> FraudScoreDetails {
-    let initial_result = nearest(vector, records, IVF_INITIAL_PROBES);
+    let initial_result = nearest(vector, records, IVF_FINE_PROBES);
     // let final_result = if initial_result.boundary_case {
-    //     nearest(vector, records, IVF_MAX_PROBES)
+    //     nearest(vector, records, IVF_FINE_PROBES)
     // } else {
     //     initial_result
     // };
@@ -218,6 +220,7 @@ mod tests {
 
         fn for_each_primary_candidate_batch<C, V>(
             &self,
+            _context: &crate::memory::SearchContext,
             _vector: &ReferenceVector,
             start_probe: usize,
             _end_probe: usize,
@@ -268,7 +271,7 @@ mod tests {
         ];
 
         assert_eq!(
-            nearest(&query, &records, IVF_MAX_PROBES)
+            nearest(&query, &records, IVF_FINE_PROBES)
                 .candidates()
                 .iter()
                 .take(NEAREST_COUNT)
@@ -426,7 +429,7 @@ mod tests {
         };
 
         assert_eq!(
-            nearest(&query, &records, IVF_MAX_PROBES)
+            nearest(&query, &records, IVF_FINE_PROBES)
                 .candidates()
                 .iter()
                 .map(|candidate| candidate.index)
