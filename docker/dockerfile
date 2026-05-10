@@ -4,7 +4,6 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main(){}" > src/main.rs
 RUN cargo fetch
 COPY src ./src
-ENV RUSTFLAGS="-C target-cpu=haswell"
 RUN cargo build --release --bin rinha
 
 FROM gcr.io/distroless/cc-debian13
