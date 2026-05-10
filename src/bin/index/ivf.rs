@@ -76,6 +76,10 @@ impl IndexIvf {
             );
         }
 
+        if IVF_FINE_CENTROIDS % 8 != 0 {
+            bail!("invalid centroid count: {IVF_FINE_CENTROIDS} is not a multiple of 8");
+        }
+
         Ok(())
     }
 
@@ -350,8 +354,13 @@ impl IndexIvf {
         writer.write_all(&(indices.len() as u64).to_le_bytes())?;
         writer.write_all(&(u64::from(block_count)).to_le_bytes())?;
 
-        for centroid in centroids {
-            Self::write_vector(&mut writer, centroid)?;
+        for chunk in centroids.chunks(8) {
+            let mut lanes = [[0_i16; VECTOR_DIMENSIONS]; 8];
+            for (lane, centroid) in chunk.iter().copied().enumerate() {
+                lanes[lane] = centroid;
+            }
+
+            Self::write_block_vectors(&mut writer, &lanes)?;
         }
 
         for offset in offsets {
@@ -394,14 +403,6 @@ impl IndexIvf {
 
         writer.write_all(dataset.fraud_bits())?;
         writer.flush()?;
-        Ok(())
-    }
-
-    fn write_vector(writer: &mut BufWriter<File>, vector: &ReferenceVector) -> Result<()> {
-        for value in vector {
-            writer.write_all(&value.to_le_bytes())?;
-        }
-
         Ok(())
     }
 

@@ -6,7 +6,7 @@
 
 1. A request é desserializada.
 2. A transação é normalizada em vetor quantizado de `16` dimensões.
-3. A query é comparada contra todos os `4096` centroids.
+3. A query é comparada contra todos os `4096` centroids em blocos AVX2 de `8`.
 4. Os `2` centroids mais próximos são usados no lote principal.
 5. As listas invertidas desses centroids são percorridas até o limite configurado de blocos de candidatos.
 6. Cada bloco compara até `8` referências candidatas por distância euclidiana ao quadrado.

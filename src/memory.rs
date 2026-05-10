@@ -180,17 +180,6 @@ fn distance2_first8_vector(a: &ReferenceVector, b: &ReferenceVector) -> u64 {
 }
 
 #[inline(always)]
-fn distance2_first8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
-    use std::arch::x86_64::*;
-
-    unsafe {
-        let left = _mm_loadu_si128(vector.as_ptr().cast::<__m128i>());
-        let right = _mm_loadu_si128(reference.cast::<__m128i>());
-        distance2_first8_sse2(left, right)
-    }
-}
-
-#[inline(always)]
 unsafe fn distance2_first8_sse2(
     left: std::arch::x86_64::__m128i,
     right: std::arch::x86_64::__m128i,
@@ -340,14 +329,24 @@ impl IvfIndex {
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
+        let query_pairs = unsafe { vector_query_pairs_avx2(vector) };
         let mut nearest = TopCentroids::<IVF_MAX_PROBES>::new();
 
-        for centroid in 0..self.centroid_count {
+        for centroid_block in 0..self.centroid_count / IVF_BLOCK_LANES {
             let limit = nearest.current_worst_distance();
-            let distance = self.centroid_distance2_at_limited(centroid, vector, limit);
+            let distances = unsafe {
+                vector_block_distances_avx2_limited(
+                    self.centroid_block_ptr(centroid_block),
+                    &query_pairs,
+                    IVF_BLOCK_LANES,
+                    limit,
+                )
+            };
 
-            if is_candidate_distance_useful(distance, limit) {
-                nearest.add(centroid, distance);
+            for (lane, distance) in distances.iter().copied().enumerate() {
+                if is_candidate_distance_useful(distance, nearest.current_worst_distance()) {
+                    nearest.add(centroid_block * IVF_BLOCK_LANES + lane, distance);
+                }
             }
         }
 
@@ -401,7 +400,7 @@ impl IvfIndex {
             return;
         }
 
-        let query_pairs = unsafe { candidate_query_pairs_avx2(vector) };
+        let query_pairs = unsafe { vector_query_pairs_avx2(vector) };
         let mut compared_blocks = 0;
 
         for centroid in centroids.iter().copied() {
@@ -422,7 +421,7 @@ impl IvfIndex {
                 let max_useful_distance = current_worst_top_distance();
                 let block_ptr = self.block_vector_ptr(block);
                 let distances = unsafe {
-                    candidate_block_distances_avx2_limited(
+                    vector_block_distances_avx2_limited(
                         block_ptr,
                         &query_pairs,
                         valid_lanes,
@@ -446,20 +445,6 @@ impl IvfIndex {
         }
     }
 
-    fn centroid_distance2_at_limited(
-        &self,
-        centroid: usize,
-        vector: &ReferenceVector,
-        limit: u64,
-    ) -> u64 {
-        distance2_mmap_at_limited(
-            &self.mmap,
-            self.centroid_vector_offset(centroid),
-            vector,
-            limit,
-        )
-    }
-
     fn candidate_offset_at(&self, centroid: usize) -> u32 {
         read_u32_at(&self.mmap, self.candidate_offset_offset(centroid))
     }
@@ -474,8 +459,18 @@ impl IvfIndex {
         read_u32_at(&self.mmap, self.block_index_offset(block, lane))
     }
 
-    fn centroid_vector_offset(&self, centroid: usize) -> usize {
-        self.centroids_offset + centroid * VECTOR_LEN
+    fn centroid_block_offset(&self, block: usize) -> usize {
+        debug_assert!(block < self.centroid_count / IVF_BLOCK_LANES);
+        self.centroids_offset + block * IVF_BLOCK_VECTOR_LEN
+    }
+
+    fn centroid_block_ptr(&self, block: usize) -> *const i16 {
+        unsafe {
+            self.mmap
+                .as_ptr()
+                .add(self.centroid_block_offset(block))
+                .cast::<i16>()
+        }
     }
 
     fn candidate_offset_offset(&self, centroid: usize) -> usize {
@@ -505,41 +500,8 @@ impl IvfIndex {
     }
 }
 
-fn distance2_mmap_at_limited(
-    mmap: &Mmap,
-    offset: usize,
-    vector: &ReferenceVector,
-    limit: u64,
-) -> u64 {
-    let reference = unsafe { mmap.as_ptr().add(offset).cast::<i16>() };
-    let mut distance = distance2_first8_mmap(reference, vector);
-
-    if distance >= limit {
-        return distance;
-    }
-
-    distance += distance2_last8_mmap(reference, vector);
-
-    if distance >= limit {
-        return distance;
-    }
-
-    distance
-}
-
-#[inline(always)]
-fn distance2_last8_mmap(reference: *const i16, vector: &ReferenceVector) -> u64 {
-    use std::arch::x86_64::*;
-
-    unsafe {
-        let left = _mm_loadu_si128(vector.as_ptr().add(8).cast::<__m128i>());
-        let right = _mm_loadu_si128(reference.add(8).cast::<__m128i>());
-        distance2_first8_sse2(left, right)
-    }
-}
-
 #[target_feature(enable = "avx2")]
-unsafe fn candidate_query_pairs_avx2(
+unsafe fn vector_query_pairs_avx2(
     vector: &ReferenceVector,
 ) -> [std::arch::x86_64::__m256i; IVF_BLOCK_PAIRS] {
     use std::arch::x86_64::*;
@@ -559,7 +521,7 @@ unsafe fn candidate_query_pairs_avx2(
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn candidate_block_distances_avx2_limited(
+unsafe fn vector_block_distances_avx2_limited(
     block_ptr: *const i16,
     query_pairs: &[std::arch::x86_64::__m256i; IVF_BLOCK_PAIRS],
     valid_lanes: usize,
@@ -658,6 +620,10 @@ impl IvfLayout {
             bail!("invalid IVF binary: no centroids");
         }
 
+        if centroid_count % IVF_BLOCK_LANES != 0 {
+            bail!("invalid IVF binary: centroid count must be a multiple of {IVF_BLOCK_LANES}");
+        }
+
         let candidate_count_offset = centroid_count_offset + size_of::<u32>();
         let candidate_count = read_u64_at(bytes, candidate_count_offset) as usize;
         let block_count_offset = candidate_count_offset + size_of::<u64>();
@@ -732,16 +698,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_ivf_bytes(reference_count: usize, candidate_lists: &[Vec<u32>]) -> Vec<u8> {
-        let centroid_count = candidate_lists.len();
+        let centroid_count = candidate_lists.len().div_ceil(IVF_BLOCK_LANES) * IVF_BLOCK_LANES;
         let candidate_count = candidate_lists.iter().map(Vec::len).sum::<usize>();
         let mut candidate_offsets = vec![0_u32; centroid_count + 1];
         let mut block_offsets = vec![0_u32; centroid_count + 1];
 
         for centroid in 0..centroid_count {
-            candidate_offsets[centroid + 1] =
-                candidate_offsets[centroid] + candidate_lists[centroid].len() as u32;
-            block_offsets[centroid + 1] =
-                block_offsets[centroid] + (candidate_lists[centroid].len() as u32).div_ceil(8);
+            let candidate_count = candidate_lists.get(centroid).map_or(0, Vec::len) as u32;
+            candidate_offsets[centroid + 1] = candidate_offsets[centroid] + candidate_count;
+            block_offsets[centroid + 1] = block_offsets[centroid] + candidate_count.div_ceil(8);
         }
 
         let block_count = *block_offsets.last().unwrap() as usize;
@@ -752,8 +717,8 @@ mod tests {
         bytes.extend_from_slice(&(candidate_count as u64).to_le_bytes());
         bytes.extend_from_slice(&(block_count as u64).to_le_bytes());
 
-        for _ in 0..centroid_count * VECTOR_DIMENSIONS {
-            bytes.extend_from_slice(&0_i16.to_le_bytes());
+        for _ in 0..centroid_count / IVF_BLOCK_LANES {
+            append_block_vectors(&mut bytes, &[[0_i16; VECTOR_DIMENSIONS]; IVF_BLOCK_LANES]);
         }
 
         for offset in &candidate_offsets {
@@ -840,16 +805,16 @@ mod tests {
         let layout = IvfLayout::read(&bytes, Some(0)).unwrap();
 
         assert_eq!(layout.reference_count, 0);
-        assert_eq!(layout.centroid_count, 1);
+        assert_eq!(layout.centroid_count, IVF_BLOCK_LANES);
         assert_eq!(layout.block_count, 0);
         assert_eq!(layout.centroids_offset, IVF_HEADER_LEN);
         assert_eq!(
             layout.block_offsets_offset,
-            layout.candidate_offsets_offset + 2 * size_of::<u32>()
+            layout.candidate_offsets_offset + (IVF_BLOCK_LANES + 1) * size_of::<u32>()
         );
         assert_eq!(
             layout.blocks_offset,
-            layout.block_offsets_offset + 2 * size_of::<u32>()
+            layout.block_offsets_offset + (IVF_BLOCK_LANES + 1) * size_of::<u32>()
         );
     }
 
@@ -898,8 +863,9 @@ mod tests {
     #[test]
     fn rejects_invalid_last_candidate_offset() {
         let mut bytes = sample_ivf_bytes(3, &[vec![2, 0, 1]]);
-        let offsets_offset = IVF_HEADER_LEN + VECTOR_LEN;
-        bytes[offsets_offset + size_of::<u32>()..offsets_offset + 2 * size_of::<u32>()]
+        let offsets_offset = IVF_HEADER_LEN + IVF_BLOCK_VECTOR_LEN;
+        let last_offset = offsets_offset + IVF_BLOCK_LANES * size_of::<u32>();
+        bytes[last_offset..last_offset + size_of::<u32>()]
             .copy_from_slice(&2_u32.to_le_bytes());
 
         let error = IvfLayout::read(&bytes, Some(3)).unwrap_err().to_string();
@@ -910,8 +876,10 @@ mod tests {
     #[test]
     fn rejects_invalid_last_block_offset() {
         let mut bytes = sample_ivf_bytes(3, &[vec![2, 0, 1]]);
-        let block_offsets_offset = IVF_HEADER_LEN + VECTOR_LEN + 2 * size_of::<u32>();
-        bytes[block_offsets_offset + size_of::<u32>()..block_offsets_offset + 2 * size_of::<u32>()]
+        let block_offsets_offset =
+            IVF_HEADER_LEN + IVF_BLOCK_VECTOR_LEN + (IVF_BLOCK_LANES + 1) * size_of::<u32>();
+        let last_offset = block_offsets_offset + IVF_BLOCK_LANES * size_of::<u32>();
+        bytes[last_offset..last_offset + size_of::<u32>()]
             .copy_from_slice(&2_u32.to_le_bytes());
 
         let error = IvfLayout::read(&bytes, Some(3)).unwrap_err().to_string();
@@ -1008,9 +976,9 @@ mod tests {
             let mut block = Vec::new();
             append_block_vectors(&mut block, &lanes);
             let block_ptr = block.as_ptr().cast::<i16>();
-            let query_pairs = unsafe { candidate_query_pairs_avx2(&query) };
+            let query_pairs = unsafe { vector_query_pairs_avx2(&query) };
             let avx2 = unsafe {
-                candidate_block_distances_avx2_limited(
+                vector_block_distances_avx2_limited(
                     block_ptr,
                     &query_pairs,
                     valid_lanes,

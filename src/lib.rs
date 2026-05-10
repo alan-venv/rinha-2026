@@ -5,7 +5,7 @@ pub type ReferenceVector = [i16; VECTOR_DIMENSIONS];
 pub const NEAREST_COUNT: usize = 5;
 
 // IVF_FLAT
-pub const IVF_MAGIC: &[u8; 8] = b"R26IBL01";
+pub const IVF_MAGIC: &[u8; 8] = b"R26IBL02";
 pub const IVF_HEADER_LEN: usize =
     IVF_MAGIC.len() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>() + size_of::<u64>();
 
