@@ -1,6 +1,6 @@
 services:
   haproxy:
-    image: haproxy:3.2.3-alpine
+    image: haproxy:3.3.9-alpine
     container_name: rinha-haproxy
     ports:
       - 9999:80
