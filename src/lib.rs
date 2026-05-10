@@ -10,7 +10,7 @@ pub const HNSW_HEADER_LEN: usize =
     HNSW_MAGIC.len() + size_of::<u64>() + size_of::<u32>() + size_of::<u8>() + 3 + size_of::<u64>();
 pub const HNSW_M: usize = 4;
 pub const HNSW_UPPER_M: usize = 2;
-pub const HNSW_EF_SEARCH: usize = 32;
+pub const HNSW_EF_SEARCH: usize = 128;
 pub const HNSW_EF_CONSTRUCTION: usize = 64;
 pub const EMPTY_NEIGHBOR: u32 = u32::MAX;
 

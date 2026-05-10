@@ -1,6 +1,8 @@
 use crate::memory::{NearestCandidate, ReferenceSource};
 use crate::*;
 
+const BOUNDARY_LOOKAHEAD: usize = 32;
+
 pub fn fraud_score(vector: &ReferenceVector, records: &(impl ReferenceSource + ?Sized)) -> f32 {
     fraud_score_details(vector, records).score
 }
@@ -14,7 +16,7 @@ pub fn fraud_score_details(
     vector: &ReferenceVector,
     records: &(impl ReferenceSource + ?Sized),
 ) -> FraudScoreDetails {
-    let nearest = records.search_top(vector, NEAREST_COUNT);
+    let nearest = records.search_top(vector, BOUNDARY_LOOKAHEAD);
     let score = score_from_nearest(&nearest, records);
 
     FraudScoreDetails {
@@ -54,7 +56,14 @@ fn is_boundary_case(
     let top = &candidates[..NEAREST_COUNT];
     let frauds = fraud_count(top, records);
 
-    frauds > 0 && frauds < top.len()
+    if frauds > 0 && frauds < top.len() {
+        return true;
+    }
+
+    let expanded = &candidates[..candidates.len().min(BOUNDARY_LOOKAHEAD)];
+    let expanded_frauds = fraud_count(expanded, records);
+
+    expanded_frauds > 0 && expanded_frauds < expanded.len()
 }
 
 #[cfg(test)]
