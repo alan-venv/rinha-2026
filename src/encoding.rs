@@ -29,13 +29,8 @@ pub fn vectorization(request: ContentRequest) -> ReferenceVector {
     let n11 = n11(&customer.known_merchants, &merchant.id);
     let n12 = n12(&merchant.mcc);
     let n13 = n13(merchant.avg_amount);
-    let n14 = n14();
-    let n15 = n15();
 
-    [
-        n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n15,
-    ]
-    .map(q)
+    [n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13].map(q)
 }
 
 fn n0(amount: f64) -> f32 {
@@ -108,14 +103,6 @@ fn n12(mcc: &str) -> f32 {
 
 fn n13(avg_amount: f64) -> f32 {
     c(avg_amount / N[6])
-}
-
-fn n14() -> f32 {
-    0.0
-}
-
-fn n15() -> f32 {
-    0.0
 }
 
 fn c(x: f64) -> f32 {
@@ -276,5 +263,25 @@ mod tests {
     fn uses_default_for_unknown_or_invalid_mcc() {
         assert_eq!(n12("0000"), R0);
         assert_eq!(n12("invalid"), R0);
+    }
+
+    #[test]
+    fn vectorization_returns_fourteen_dimensions() {
+        let request = ContentRequest {
+            id: "tx".to_string(),
+            transaction: transaction(utc(2026, 3, 11, 20, 23, 35)),
+            customer: customer(vec!["MERC-001".to_string()]),
+            merchant: merchant("MERC-001"),
+            terminal: crate::dto::Terminal {
+                is_online: true,
+                card_present: false,
+                km_from_home: 10.0,
+            },
+            last_transaction: None,
+        };
+
+        let vector = vectorization(request);
+
+        assert_eq!(vector.len(), 14);
     }
 }

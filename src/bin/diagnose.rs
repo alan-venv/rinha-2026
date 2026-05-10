@@ -4,7 +4,7 @@ use std::time::Instant;
 use anyhow::Result;
 use rinha::dto::ContentRequest;
 use rinha::memory;
-use rinha::{encoding, service};
+use rinha::{HNSW_EF_SEARCH, HNSW_M, HNSW_UPPER_M, encoding, service};
 use serde::{Deserialize, Serialize};
 
 const MAX_ELAPSED_MS: u128 = 6_000;
@@ -24,19 +24,36 @@ struct TestEntry {
 #[derive(Serialize)]
 struct DiagnoseOutput {
     core: DiagnoseCore,
+    hnsw: DiagnoseHnsw,
     warnings: DiagnoseWarnings,
 }
 
 #[derive(Serialize)]
 struct DiagnoseCore {
     entries: usize,
-    elapsed_ms: u128,
+    load_elapsed_ms: u128,
+    search_elapsed_ms: u128,
+    avg_us: u128,
+    p50_us: u128,
+    p95_us: u128,
+    p99_us: u128,
+    max_us: u128,
     boundary_cases: usize,
     boundary_case_percentage: String,
     decision_mismatches: usize,
     decision_mismatch_percentage: String,
     boundary_decision_mismatches: usize,
     primary_only_decision_mismatches: usize,
+}
+
+#[derive(Serialize)]
+struct DiagnoseHnsw {
+    m: usize,
+    upper_m: usize,
+    ef_search: usize,
+    entrypoint: usize,
+    max_level: u8,
+    reference_count: usize,
 }
 
 #[derive(Serialize)]
@@ -52,11 +69,16 @@ struct DiagnoseWarning {
 }
 
 fn main() -> Result<()> {
+    let load_started = Instant::now();
     let references = memory::load_references()?;
+    let load_elapsed_ms = load_started.elapsed().as_millis();
+    let info = references.hnsw_info();
+
     let input = File::open("scripts/k6/data.json")?;
     let data: TestData = serde_json::from_reader(input)?;
     let total = data.entries.len();
-    let started = Instant::now();
+    let search_started = Instant::now();
+    let mut timings = Vec::with_capacity(total);
     let mut decision_mismatches = 0;
     let mut boundary_cases = 0;
     let mut boundary_decision_mismatches = 0;
@@ -64,7 +86,9 @@ fn main() -> Result<()> {
 
     for entry in data.entries {
         let vector = encoding::vectorization(entry.request);
+        let entry_started = Instant::now();
         let details = service::fraud_score_details(&vector, &references);
+        timings.push(entry_started.elapsed().as_micros());
         let approved = details.score < 0.6;
 
         if details.boundary_case {
@@ -83,9 +107,18 @@ fn main() -> Result<()> {
         }
     }
 
+    let search_elapsed_ms = search_started.elapsed().as_millis();
+    timings.sort_unstable();
+
     let core = DiagnoseCore {
         entries: total,
-        elapsed_ms: started.elapsed().as_millis(),
+        load_elapsed_ms,
+        search_elapsed_ms,
+        avg_us: average(&timings),
+        p50_us: percentile(&timings, 50),
+        p95_us: percentile(&timings, 95),
+        p99_us: percentile(&timings, 99),
+        max_us: timings.last().copied().unwrap_or(0),
         boundary_cases,
         boundary_case_percentage: percentage(boundary_cases, total),
         decision_mismatches,
@@ -93,9 +126,18 @@ fn main() -> Result<()> {
         boundary_decision_mismatches,
         primary_only_decision_mismatches,
     };
+    let hnsw = DiagnoseHnsw {
+        m: HNSW_M,
+        upper_m: HNSW_UPPER_M,
+        ef_search: HNSW_EF_SEARCH,
+        entrypoint: info.entrypoint,
+        max_level: info.max_level,
+        reference_count: info.reference_count,
+    };
     let output = DiagnoseOutput {
         warnings: diagnose_warnings(&core),
         core,
+        hnsw,
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -106,10 +148,10 @@ fn main() -> Result<()> {
 fn diagnose_warnings(core: &DiagnoseCore) -> DiagnoseWarnings {
     let mut items = Vec::new();
 
-    if core.elapsed_ms > MAX_ELAPSED_MS {
+    if core.search_elapsed_ms > MAX_ELAPSED_MS {
         items.push(DiagnoseWarning {
-            metric: "elapsed_ms",
-            actual: core.elapsed_ms.to_string(),
+            metric: "search_elapsed_ms",
+            actual: core.search_elapsed_ms.to_string(),
             limit: MAX_ELAPSED_MS.to_string(),
         });
     }
@@ -132,6 +174,23 @@ fn diagnose_warnings(core: &DiagnoseCore) -> DiagnoseWarnings {
     }
 
     DiagnoseWarnings { items }
+}
+
+fn average(values: &[u128]) -> u128 {
+    if values.is_empty() {
+        return 0;
+    }
+
+    values.iter().sum::<u128>() / values.len() as u128
+}
+
+fn percentile(values: &[u128], percentile: usize) -> u128 {
+    if values.is_empty() {
+        return 0;
+    }
+
+    let index = ((values.len() - 1) * percentile).div_ceil(100);
+    values[index]
 }
 
 fn percentage(value: usize, total: usize) -> String {

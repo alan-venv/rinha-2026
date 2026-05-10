@@ -1,24 +1,18 @@
 // COMMON
-pub const VECTOR_DIMENSIONS: usize = 16;
+pub const VECTOR_DIMENSIONS: usize = 14;
 pub const VECTOR_LEN: usize = VECTOR_DIMENSIONS * size_of::<i16>();
 pub type ReferenceVector = [i16; VECTOR_DIMENSIONS];
 pub const NEAREST_COUNT: usize = 5;
 
-// IVF_FLAT
-pub const IVF_MAGIC: &[u8; 8] = b"R26IFL04";
-pub const IVF_HEADER_LEN: usize =
-    IVF_MAGIC.len() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>();
-
-pub const IVF_FINE_SAMPLES: usize = 3_000_000;
-pub const IVF_FINE_CENTROIDS: usize = 32768;
-pub const IVF_FINE_ITERATIONS: usize = 80;
-
-pub const IVF_COARSE_CENTROIDS: usize = 1024; // ~64 fine centroids per coarse
-pub const IVF_COARSE_ITERATIONS: usize = 6;
-
-pub const IVF_MAX_COARSE_PROBES: usize = 32; // coarse probes = fine centroids
-pub const IVF_COARSE_PROBES: usize = 16;
-pub const IVF_FINE_PROBES: usize = 4;
+// HNSW
+pub const HNSW_MAGIC: &[u8; 8] = b"R26HNW01";
+pub const HNSW_HEADER_LEN: usize =
+    HNSW_MAGIC.len() + size_of::<u64>() + size_of::<u32>() + size_of::<u8>() + 3 + size_of::<u64>();
+pub const HNSW_M: usize = 4;
+pub const HNSW_UPPER_M: usize = 2;
+pub const HNSW_EF_SEARCH: usize = 32;
+pub const HNSW_EF_CONSTRUCTION: usize = 64;
+pub const EMPTY_NEIGHBOR: u32 = u32::MAX;
 
 pub mod controller;
 pub mod dto;

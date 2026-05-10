@@ -1,14 +1,14 @@
-mod ivf;
+mod hnsw;
 mod reference;
 mod structs;
 
 use anyhow::Result;
 
-use crate::ivf::IndexIvf;
+use crate::hnsw::IndexHnsw;
 use crate::reference::ReferenceDataset;
 
 fn main() -> Result<()> {
     let dataset = ReferenceDataset::load()?;
-    IndexIvf::build(&dataset)?;
+    IndexHnsw::build(&dataset)?;
     Ok(())
 }
