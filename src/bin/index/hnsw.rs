@@ -326,11 +326,52 @@ impl HnswBuildGraph {
             });
         }
 
-        let selected = self.select_neighbors(dataset, &candidates, capacity);
+        let mut selected = self.select_neighbors(dataset, &candidates, capacity);
+        self.keep_competitive_backlink(dataset, target, source, &mut selected, capacity);
+
         if level == 0 {
             self.set_level0_neighbors(target, &selected);
         } else {
             self.set_upper_neighbors(target, level, &selected);
+        }
+    }
+
+    fn keep_competitive_backlink(
+        &self,
+        dataset: &ReferenceDataset,
+        target: usize,
+        source: usize,
+        selected: &mut Vec<usize>,
+        capacity: usize,
+    ) {
+        if selected.contains(&source) {
+            return;
+        }
+
+        if selected.len() < capacity {
+            selected.push(source);
+            return;
+        }
+
+        let target_vector = dataset.vector_at(target);
+        let source_distance =
+            distance2_limited(&target_vector, &dataset.vector_at(source), u64::MAX);
+        let Some((slot, worst_distance)) = selected
+            .iter()
+            .enumerate()
+            .map(|(slot, neighbor)| {
+                (
+                    slot,
+                    distance2_limited(&target_vector, &dataset.vector_at(*neighbor), u64::MAX),
+                )
+            })
+            .max_by_key(|(_, distance)| *distance)
+        else {
+            return;
+        };
+
+        if source_distance < worst_distance {
+            selected[slot] = source;
         }
     }
 
