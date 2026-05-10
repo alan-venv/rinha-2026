@@ -16,14 +16,3 @@
 9. O `fraud_score` é calculado como fraudes no top 5 dividido por 5.
 10. Se o top 5 tiver classes misturadas, a transação é marcada como `boundary_case`.
 11. A resposta é escolhida de uma tabela JSON estática a partir do `fraud_score`.
-
-## Diagnóstico
-
-O `diagnose` mede apenas o caminho principal:
-
-- total de entradas
-- tempo total de processamento
-- quantidade e percentual de `boundary_cases`
-- divergências de decisão
-- divergências dentro de `boundary_cases`
-- divergências fora de `boundary_cases`
