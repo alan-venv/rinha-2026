@@ -7,7 +7,7 @@ repo="rinha-de-backend-2026"
 title="rinha/test"
 body="rinha/test"
 
-read -r -s -p "GitHub token: " github_token
+read -rsp "GHCR_TOKEN: " github_token
 echo
 
 if [ -z "$github_token" ]; then
