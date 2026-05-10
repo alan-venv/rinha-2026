@@ -10,15 +10,15 @@ pub const IVF_HEADER_LEN: usize =
     IVF_MAGIC.len() + size_of::<u64>() + size_of::<u32>() + size_of::<u64>();
 
 pub const IVF_FINE_SAMPLES: usize = 3_000_000;
-pub const IVF_FINE_CENTROIDS: usize = 4096;
-pub const IVF_FINE_ITERATIONS: usize = 200;
+pub const IVF_FINE_CENTROIDS: usize = 32768;
+pub const IVF_FINE_ITERATIONS: usize = 80;
 
-pub const IVF_COARSE_CENTROIDS: usize = 64; // ~64 fine centroids per coarse
-pub const IVF_COARSE_ITERATIONS: usize = 8;
+pub const IVF_COARSE_CENTROIDS: usize = 1024; // ~64 fine centroids per coarse
+pub const IVF_COARSE_ITERATIONS: usize = 6;
 
-pub const IVF_MAX_COARSE_PROBES: usize = 48; // coarse probes = fine centroids
-pub const IVF_COARSE_PROBES: usize = 32;
-pub const IVF_FINE_PROBES: usize = 2;
+pub const IVF_MAX_COARSE_PROBES: usize = 32; // coarse probes = fine centroids
+pub const IVF_COARSE_PROBES: usize = 16;
+pub const IVF_FINE_PROBES: usize = 4;
 
 pub mod controller;
 pub mod dto;
