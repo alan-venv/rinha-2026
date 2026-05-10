@@ -377,12 +377,7 @@ impl IvfIndex {
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
-        let use_avx2 = is_x86_feature_detected!("avx2");
-        let query_pairs = if use_avx2 {
-            Some(unsafe { candidate_query_pairs_avx2(vector) })
-        } else {
-            None
-        };
+        let query_pairs = unsafe { candidate_query_pairs_avx2(vector) };
 
         for centroid in centroids.iter().copied() {
             let candidate_start = self.candidate_offset_at(centroid) as usize;
@@ -396,19 +391,10 @@ impl IvfIndex {
                 let valid_lanes = remaining.min(IVF_BLOCK_LANES);
                 let max_useful_distance = current_worst_top_distance();
                 let block_ptr = self.block_vector_ptr(block);
-                let distances = if let Some(query_pairs) = &query_pairs {
-                    unsafe {
-                        candidate_block_distances_avx2_limited(
-                            block_ptr,
-                            query_pairs,
-                            valid_lanes,
-                            max_useful_distance,
-                        )
-                    }
-                } else {
-                    candidate_block_distances_scalar(
+                let distances = unsafe {
+                    candidate_block_distances_avx2_limited(
                         block_ptr,
-                        vector,
+                        &query_pairs,
                         valid_lanes,
                         max_useful_distance,
                     )
@@ -543,17 +529,6 @@ unsafe fn candidate_query_pairs_avx2(
 }
 
 #[target_feature(enable = "avx2")]
-#[allow(dead_code)]
-unsafe fn candidate_block_distances_avx2(
-    block_ptr: *const i16,
-    query_pairs: &[std::arch::x86_64::__m256i; IVF_BLOCK_PAIRS],
-) -> [u64; IVF_BLOCK_LANES] {
-    unsafe {
-        candidate_block_distances_avx2_limited(block_ptr, query_pairs, IVF_BLOCK_LANES, u64::MAX)
-    }
-}
-
-#[target_feature(enable = "avx2")]
 unsafe fn candidate_block_distances_avx2_limited(
     block_ptr: *const i16,
     query_pairs: &[std::arch::x86_64::__m256i; IVF_BLOCK_PAIRS],
@@ -599,53 +574,6 @@ unsafe fn candidate_block_distances_avx2_limited(
     distances
 }
 
-fn candidate_block_distances_scalar(
-    block_ptr: *const i16,
-    vector: &ReferenceVector,
-    valid_lanes: usize,
-    limit: u64,
-) -> [u64; IVF_BLOCK_LANES] {
-    let mut distances = [u64::MAX; IVF_BLOCK_LANES];
-
-    for lane in 0..valid_lanes {
-        let mut distance = 0_u64;
-
-        for pair in 0..4 {
-            let first = unsafe { *block_ptr.add(pair * 16 + lane * 2) };
-            let second = unsafe { *block_ptr.add(pair * 16 + lane * 2 + 1) };
-            let first_delta = i32::from(first) - i32::from(vector[pair * 2]);
-            let second_delta = i32::from(second) - i32::from(vector[pair * 2 + 1]);
-            distance += (first_delta * first_delta + second_delta * second_delta) as u64;
-        }
-
-        distances[lane] = distance;
-    }
-
-    if valid_lanes > 0
-        && distances[..valid_lanes]
-            .iter()
-            .all(|distance| *distance >= limit)
-    {
-        return distances;
-    }
-
-    for lane in 0..valid_lanes {
-        let mut distance = distances[lane];
-
-        for pair in 4..IVF_BLOCK_PAIRS {
-            let first = unsafe { *block_ptr.add(pair * 16 + lane * 2) };
-            let second = unsafe { *block_ptr.add(pair * 16 + lane * 2 + 1) };
-            let first_delta = i32::from(first) - i32::from(vector[pair * 2]);
-            let second_delta = i32::from(second) - i32::from(vector[pair * 2 + 1]);
-            distance += (first_delta * first_delta + second_delta * second_delta) as u64;
-        }
-
-        distances[lane] = distance;
-    }
-
-    distances
-}
-
 fn farthest_slot_in<const N: usize>(distances: &[u64; N]) -> usize {
     let mut farthest_slot = 0;
 
@@ -662,8 +590,6 @@ fn farthest_slot_in<const N: usize>(distances: &[u64; N]) -> usize {
 struct IvfLayout {
     reference_count: usize,
     centroid_count: usize,
-    #[allow(dead_code)]
-    candidate_count: usize,
     block_count: usize,
     centroids_offset: usize,
     candidate_offsets_offset: usize,
@@ -758,7 +684,6 @@ impl IvfLayout {
         Ok(Self {
             reference_count: count,
             centroid_count,
-            candidate_count,
             block_count,
             centroids_offset,
             candidate_offsets_offset,
@@ -886,7 +811,6 @@ mod tests {
 
         assert_eq!(layout.reference_count, 0);
         assert_eq!(layout.centroid_count, 1);
-        assert_eq!(layout.candidate_count, 0);
         assert_eq!(layout.block_count, 0);
         assert_eq!(layout.centroids_offset, IVF_HEADER_LEN);
         assert_eq!(
@@ -999,48 +923,54 @@ mod tests {
     }
 
     #[test]
-    fn scalar_and_avx2_block_distances_match() {
-        if !is_x86_feature_detected!("avx2") {
-            return;
-        }
-
+    fn calculates_avx2_block_distances() {
         let cases = [
-            ([0_i16; VECTOR_DIMENSIONS], [0_i16; VECTOR_DIMENSIONS], 8),
+            ([0_i16; VECTOR_DIMENSIONS], [0_i16; VECTOR_DIMENSIONS], 8, 0),
             (
                 [0, 0, 0, 0, 0, -10_000, -10_000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 [0_i16; VECTOR_DIMENSIONS],
                 8,
+                200_000_000,
             ),
             (
                 [10_000_i16; VECTOR_DIMENSIONS],
                 [0_i16; VECTOR_DIMENSIONS],
                 8,
+                1_600_000_000,
             ),
-            ([3_i16; VECTOR_DIMENSIONS], [1_i16; VECTOR_DIMENSIONS], 5),
+            (
+                [3_i16; VECTOR_DIMENSIONS],
+                [1_i16; VECTOR_DIMENSIONS],
+                5,
+                64,
+            ),
         ];
 
-        for (lane_vector, query, valid_lanes) in cases {
+        for (lane_vector, query, valid_lanes, expected_distance) in cases {
             let mut lanes = [[0_i16; VECTOR_DIMENSIONS]; 8];
             lanes.fill(lane_vector);
             let mut block = Vec::new();
             append_block_vectors(&mut block, &lanes);
             let block_ptr = block.as_ptr().cast::<i16>();
-            let scalar = candidate_block_distances_scalar(block_ptr, &query, valid_lanes, u64::MAX);
             let query_pairs = unsafe { candidate_query_pairs_avx2(&query) };
             let avx2 = unsafe {
-                if valid_lanes == 8 {
-                    candidate_block_distances_avx2(block_ptr, &query_pairs)
-                } else {
-                    candidate_block_distances_avx2_limited(
-                        block_ptr,
-                        &query_pairs,
-                        valid_lanes,
-                        u64::MAX,
-                    )
-                }
+                candidate_block_distances_avx2_limited(
+                    block_ptr,
+                    &query_pairs,
+                    valid_lanes,
+                    u64::MAX,
+                )
             };
 
-            assert_eq!(avx2, scalar);
+            assert_eq!(
+                avx2[..valid_lanes],
+                [expected_distance; IVF_BLOCK_LANES][..valid_lanes]
+            );
+            assert!(
+                avx2[valid_lanes..]
+                    .iter()
+                    .all(|distance| *distance == u64::MAX)
+            );
         }
     }
 }

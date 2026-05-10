@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
@@ -45,9 +43,4 @@ pub struct Terminal {
 pub struct LastTransaction {
     pub timestamp: DateTime<Utc>,
     pub km_from_current: f64,
-}
-
-struct Record {
-    vector: [f32; 14],
-    label: bool,
 }

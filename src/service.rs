@@ -169,15 +169,15 @@ pub fn fraud_score_details(
     records: &(impl ReferenceSource + ?Sized),
 ) -> FraudScoreDetails {
     let initial_result = nearest(vector, records, IVF_INITIAL_PROBES);
-    let final_result = if initial_result.boundary_case {
-        nearest(vector, records, IVF_MAX_PROBES)
-    } else {
-        initial_result
-    };
+    // let final_result = if initial_result.boundary_case {
+    //     nearest(vector, records, IVF_MAX_PROBES)
+    // } else {
+    //     initial_result
+    // };
 
     FraudScoreDetails {
-        score: score_from_nearest_result(&final_result, records),
-        boundary_case: final_result.boundary_case,
+        score: score_from_nearest_result(&initial_result, records),
+        boundary_case: initial_result.boundary_case,
     }
 }
 

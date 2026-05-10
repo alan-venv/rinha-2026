@@ -69,9 +69,10 @@ fn n5(requested_at: &DateTime<Utc>, last_transaction: &Option<LastTransaction>) 
 }
 
 fn n6(last_transaction: &Option<LastTransaction>) -> f32 {
-    last_transaction
-        .as_ref()
-        .map_or(-1.0, |last_transaction| n7(last_transaction.km_from_current))
+    last_transaction.as_ref().map_or(
+        -1.0,
+        |last_transaction| n7(last_transaction.km_from_current),
+    )
 }
 
 fn n7(km_from_home: f64) -> f32 {
