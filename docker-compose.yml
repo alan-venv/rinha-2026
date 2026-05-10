@@ -19,7 +19,7 @@ services:
           memory: "50MB"
 
   rinha-service-1:
-    image: ghcr.io/alan-venv/rinha-service-2026:1778424312
+    image: ghcr.io/alan-venv/rinha-service-2026:1778425184
     container_name: rinha-service-1
     environment:
       - SOCKET=/sockets/service-1.sock
@@ -34,7 +34,7 @@ services:
           memory: "150MB"
 
   rinha-service-2:
-    image: ghcr.io/alan-venv/rinha-service-2026:1778424312
+    image: ghcr.io/alan-venv/rinha-service-2026:1778425184
     container_name: rinha-service-2
     environment:
       - SOCKET=/sockets/service-2.sock
