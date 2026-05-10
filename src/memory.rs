@@ -377,7 +377,32 @@ impl IvfIndex {
         C: FnMut() -> u64,
         V: FnMut(usize, u64),
     {
+        self.for_each_limited_candidate_blocks_from_centroids(
+            centroids,
+            vector,
+            IVF_MAX_CANDIDATE_BLOCKS,
+            current_worst_top_distance,
+            visit,
+        );
+    }
+
+    fn for_each_limited_candidate_blocks_from_centroids<C, V>(
+        &self,
+        centroids: &[usize],
+        vector: &ReferenceVector,
+        max_candidate_blocks: usize,
+        current_worst_top_distance: &mut C,
+        visit: &mut V,
+    ) where
+        C: FnMut() -> u64,
+        V: FnMut(usize, u64),
+    {
+        if max_candidate_blocks == 0 {
+            return;
+        }
+
         let query_pairs = unsafe { candidate_query_pairs_avx2(vector) };
+        let mut compared_blocks = 0;
 
         for centroid in centroids.iter().copied() {
             let candidate_start = self.candidate_offset_at(centroid) as usize;
@@ -386,6 +411,11 @@ impl IvfIndex {
             let block_end = self.block_offset_at(centroid + 1) as usize;
 
             for (local_block_index, block) in (block_start..block_end).enumerate() {
+                if compared_blocks == max_candidate_blocks {
+                    return;
+                }
+                compared_blocks += 1;
+
                 let remaining =
                     candidate_end - (candidate_start + local_block_index * IVF_BLOCK_LANES);
                 let valid_lanes = remaining.min(IVF_BLOCK_LANES);
@@ -920,6 +950,32 @@ mod tests {
 
         assert_eq!(visited.len(), 9);
         assert_eq!(visited[8], (8, 64));
+    }
+
+    #[test]
+    fn limits_candidate_blocks_across_centroids() {
+        let bytes = sample_ivf_bytes(
+            20,
+            &[
+                vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+                vec![16, 17, 18, 19],
+            ],
+        );
+        let index = sample_index(bytes, 20);
+        let mut visited = Vec::new();
+
+        index.for_each_limited_candidate_blocks_from_centroids(
+            &[0, 1],
+            &[0; VECTOR_DIMENSIONS],
+            2,
+            &mut || u64::MAX,
+            &mut |index, _distance| visited.push(index),
+        );
+
+        assert_eq!(
+            visited,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
     }
 
     #[test]

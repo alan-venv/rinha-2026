@@ -7,14 +7,13 @@
 1. A request é desserializada.
 2. A transação é normalizada em vetor quantizado de `16` dimensões.
 3. A query é comparada contra todos os `4096` centroids.
-4. Os `8` centroids mais próximos são usados no primeiro lote.
-5. As listas invertidas desses centroids são percorridas.
-6. Cada referência candidata é comparada por distância euclidiana ao quadrado.
+4. Os `2` centroids mais próximos são usados no lote principal.
+5. As listas invertidas desses centroids são percorridas até o limite configurado de blocos de candidatos.
+6. Cada bloco compara até `8` referências candidatas por distância euclidiana ao quadrado.
 7. O top `5` vizinhos mais próximos é mantido durante a busca.
 8. O `fraud_score` é calculado como fraudes no top 5 dividido por 5.
 9. Se o top 5 tiver classes misturadas, a transação é marcada como `boundary_case`.
-10. Para `boundary_case`, a busca repete o mesmo fluxo usando `24` centroids.
-11. A resposta é escolhida de uma tabela JSON estática a partir do `fraud_score`.
+10. A resposta é escolhida de uma tabela JSON estática a partir do `fraud_score`.
 
 ## Diagnóstico
 

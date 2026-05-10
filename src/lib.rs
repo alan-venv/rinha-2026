@@ -15,6 +15,7 @@ pub const IVF_FINE_ITERATIONS: usize = 200;
 
 pub const IVF_INITIAL_PROBES: usize = 2; // 8 = safe
 pub const IVF_MAX_PROBES: usize = 8; // 32 = safe
+pub const IVF_MAX_CANDIDATE_BLOCKS: usize = 208;
 
 pub mod controller;
 pub mod dto;
