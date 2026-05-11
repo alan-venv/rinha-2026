@@ -5,6 +5,7 @@ services:
     ports:
       - 9999:80
     volumes:
+      - sockets:/sockets:rw
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     networks:
       - backend
@@ -18,10 +19,12 @@ services:
           memory: "50MB"
 
   rinha-service-1:
-    image: ghcr.io/alan-venv/rinha-service-2026:1778501786
+    image: ghcr.io/alan-venv/rinha-service-2026:1778504791
     container_name: rinha-service-1
     environment:
-      - PORT=8080
+      - SOCKET=/sockets/service-1.sock
+    volumes:
+      - sockets:/sockets:rw
     networks:
       - backend
     deploy:
@@ -31,10 +34,12 @@ services:
           memory: "150MB"
 
   rinha-service-2:
-    image: ghcr.io/alan-venv/rinha-service-2026:1778501786
+    image: ghcr.io/alan-venv/rinha-service-2026:1778504791
     container_name: rinha-service-2
     environment:
-      - PORT=8080
+      - SOCKET=/sockets/service-2.sock
+    volumes:
+      - sockets:/sockets:rw
     networks:
       - backend
     deploy:
@@ -42,6 +47,14 @@ services:
         limits:
           cpus: "0.40"
           memory: "150MB"
+
+volumes:
+  sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=16m,mode=1777
 
 networks:
   backend:
