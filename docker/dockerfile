@@ -8,6 +8,6 @@ RUN cargo build --release --bin rinha
 
 FROM gcr.io/distroless/cc-debian13
 WORKDIR /app
-COPY resources/references/morton_index.bin ./resources/references/morton_index.bin
+COPY resources/index.bin ./resources/
 COPY --from=build /app/target/release/rinha .
 ENTRYPOINT [ "./rinha" ]
