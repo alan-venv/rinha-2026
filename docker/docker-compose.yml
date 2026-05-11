@@ -15,7 +15,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.30"
           memory: "50MB"
 
   rinha-service-1:
@@ -30,7 +30,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.35"
           memory: "150MB"
 
   rinha-service-2:
@@ -45,7 +45,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.35"
           memory: "150MB"
 
 volumes:
