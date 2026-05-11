@@ -8,7 +8,7 @@ pub async fn ready() -> impl Responder {
 
 #[post("/fraud-score")]
 // recebe references por "Data" do actix via parametro aqui
-pub async fn score() -> HttpResponse {
+pub async fn score(_body: Bytes) -> HttpResponse {
     // let vector = encoding::vectorization(request.0);
     // let fraud_score = service::fraud_score(&vector); // ,references.as_ref()
 
