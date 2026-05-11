@@ -2,12 +2,11 @@ use std::fs::File;
 
 use anyhow::Result;
 use memmap2::Mmap;
-use rinha::*;
 
 use crate::structs::{JsonLabel, ReferenceJson};
 
 pub struct ReferenceDataset {
-    pub vectors: Vec<ReferenceVector>,
+    pub vectors: Vec<[i16; 14]>,
     pub fraud_bits: Vec<u8>,
 }
 
@@ -40,12 +39,12 @@ impl ReferenceDataset {
         &self.fraud_bits
     }
 
-    pub fn vector_at(&self, index: usize) -> ReferenceVector {
+    pub fn vector_at(&self, index: usize) -> [i16; 14] {
         self.vectors[index]
     }
 
-    fn quantize_vector(vector: &[f32; 14]) -> ReferenceVector {
-        let mut quantized = [0; VECTOR_DIMENSIONS];
+    fn quantize_vector(vector: &[f32; 14]) -> [i16; 14] {
+        let mut quantized = [0; 14];
         for (output, input) in quantized[..14].iter_mut().zip(vector) {
             *output = (*input * 10_000.0).round() as i16;
         }

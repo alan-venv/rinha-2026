@@ -1,14 +1,13 @@
 use chrono::{DateTime, Datelike, Timelike, Utc};
 
 use crate::dto::{ContentRequest, LastTransaction};
-use crate::*;
 
 const N: [f64; 7] = [10000.0, 12.0, 10.0, 1440.0, 1000.0, 20.0, 10000.0];
 const R0: f32 = 0.5;
 const RK: [u16; 10] = [4511, 5311, 5411, 5812, 5912, 5944, 5999, 7801, 7802, 7995];
 const RV: [f32; 10] = [0.35, 0.25, 0.15, 0.30, 0.20, 0.45, 0.50, 0.80, 0.75, 0.85];
 
-pub fn vectorization(request: ContentRequest) -> ReferenceVector {
+pub fn vectorization(request: ContentRequest) -> [i16; 14] {
     let transaction = &request.transaction;
     let last_transaction = &request.last_transaction;
     let customer = &request.customer;
@@ -29,13 +28,8 @@ pub fn vectorization(request: ContentRequest) -> ReferenceVector {
     let n11 = n11(&customer.known_merchants, &merchant.id);
     let n12 = n12(&merchant.mcc);
     let n13 = n13(merchant.avg_amount);
-    let n14 = n14();
-    let n15 = n15();
 
-    [
-        n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n15,
-    ]
-    .map(q)
+    [n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13].map(q)
 }
 
 fn n0(amount: f64) -> f32 {
@@ -108,14 +102,6 @@ fn n12(mcc: &str) -> f32 {
 
 fn n13(avg_amount: f64) -> f32 {
     c(avg_amount / N[6])
-}
-
-fn n14() -> f32 {
-    0.0
-}
-
-fn n15() -> f32 {
-    0.0
 }
 
 fn c(x: f64) -> f32 {

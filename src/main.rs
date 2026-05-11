@@ -1,24 +1,23 @@
-use std::io::{Error, Result};
+use std::io::Result;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use mimalloc::MiMalloc;
-use rinha::{controller, memory};
+use rinha::controller;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
 #[actix_web::main]
 async fn main() -> Result<()> {
-    let references = memory::load_references().map_err(Error::other)?;
-    let references = Data::new(references);
+    //let references = memory::load_references();
+    //let references = Data::new(references);
 
     let socket = socket();
     let server = HttpServer::new(move || {
         App::new()
-            .app_data(references.clone())
+            //.app_data(references.clone())
             .service(controller::ready)
             .service(controller::score)
     })
