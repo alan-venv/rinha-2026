@@ -150,7 +150,7 @@ impl HnswIndex {
         let mut entrypoint = self.entrypoint;
         let mut entry_distance = self.distance_to(entrypoint, vector, u64::MAX);
 
-        for level in (1..=self.max_level).rev() {
+        for level in (2..=self.max_level).rev() {
             let mut changed = true;
 
             while changed {
@@ -167,19 +167,29 @@ impl HnswIndex {
             }
         }
 
-        self.search_layer0(vector, entrypoint, entry_distance, top)
+        let entrypoints = if self.max_level >= 1 {
+            self.search_upper_layer(vector, entrypoint, entry_distance, 1, HNSW_ENTRYPOINTS)
+        } else {
+            vec![NearestCandidate {
+                index: entrypoint,
+                distance: entry_distance,
+            }]
+        };
+
+        self.search_layer0(vector, &entrypoints, top)
     }
 
-    fn search_layer0(
+    fn search_upper_layer(
         &self,
         vector: &ReferenceVector,
         entrypoint: usize,
         entry_distance: u64,
-        top: usize,
+        level: u8,
+        ef: usize,
     ) -> Vec<NearestCandidate> {
-        let mut visited = Vec::with_capacity(HNSW_EF_SEARCH * HNSW_M);
+        let mut visited = Vec::with_capacity(ef * HNSW_UPPER_M);
         let mut candidates = BinaryHeap::new();
-        let mut nearest = TopNearest::new(HNSW_EF_SEARCH.max(top));
+        let mut nearest = TopNearest::new(ef);
 
         visited.push(entrypoint);
         candidates.push(Reverse(HeapCandidate {
@@ -190,6 +200,59 @@ impl HnswIndex {
             index: entrypoint,
             distance: entry_distance,
         });
+
+        while let Some(Reverse(candidate)) = candidates.pop() {
+            if nearest.is_full() && candidate.distance > nearest.current_worst_distance() {
+                break;
+            }
+
+            for neighbor in self.upper_neighbors(candidate.index, level) {
+                if visited.contains(&neighbor) {
+                    continue;
+                }
+                visited.push(neighbor);
+
+                let limit = nearest.current_worst_distance();
+                let distance = self.distance_to(neighbor, vector, limit);
+
+                if limit == u64::MAX || distance < limit {
+                    candidates.push(Reverse(HeapCandidate {
+                        distance,
+                        index: neighbor,
+                    }));
+                    nearest.add(NearestCandidate {
+                        index: neighbor,
+                        distance,
+                    });
+                }
+            }
+        }
+
+        nearest.into_sorted()
+    }
+
+    fn search_layer0(
+        &self,
+        vector: &ReferenceVector,
+        entrypoints: &[NearestCandidate],
+        top: usize,
+    ) -> Vec<NearestCandidate> {
+        let mut visited = Vec::with_capacity(HNSW_EF_SEARCH * HNSW_M);
+        let mut candidates = BinaryHeap::new();
+        let mut nearest = TopNearest::new(HNSW_EF_SEARCH.max(top));
+
+        for entrypoint in entrypoints {
+            if visited.contains(&entrypoint.index) {
+                continue;
+            }
+
+            visited.push(entrypoint.index);
+            candidates.push(Reverse(HeapCandidate {
+                distance: entrypoint.distance,
+                index: entrypoint.index,
+            }));
+            nearest.add(*entrypoint);
+        }
 
         while let Some(Reverse(candidate)) = candidates.pop() {
             if nearest.is_full() && candidate.distance > nearest.current_worst_distance() {
@@ -717,14 +780,13 @@ mod tests {
             vector[0] = (index as i16) * 100;
         }
         let levels = [0_u8; 6];
-        let level0 = [
-            [1, 2, EMPTY_NEIGHBOR, EMPTY_NEIGHBOR],
-            [0, 2, 3, EMPTY_NEIGHBOR],
-            [0, 1, 3, 4],
-            [1, 2, 4, 5],
-            [2, 3, 5, EMPTY_NEIGHBOR],
-            [3, 4, EMPTY_NEIGHBOR, EMPTY_NEIGHBOR],
-        ];
+        let mut level0 = [[EMPTY_NEIGHBOR; HNSW_M]; 6];
+        level0[0][..2].copy_from_slice(&[1, 2]);
+        level0[1][..3].copy_from_slice(&[0, 2, 3]);
+        level0[2][..4].copy_from_slice(&[0, 1, 3, 4]);
+        level0[3][..4].copy_from_slice(&[1, 2, 4, 5]);
+        level0[4][..3].copy_from_slice(&[2, 3, 5]);
+        level0[5][..2].copy_from_slice(&[3, 4]);
         let upper = [(); 6].map(|_| Vec::new());
         let bytes = sample_hnsw_bytes(&vectors, &[0], &levels, &level0, &upper, 0, 0);
         let index = sample_index(bytes);
