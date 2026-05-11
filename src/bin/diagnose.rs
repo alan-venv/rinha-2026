@@ -2,9 +2,9 @@ use std::fs::File;
 use std::time::Instant;
 
 use anyhow::Result;
-use rinha::dto::ContentRequest;
-use rinha::{encoding, service};
+use rinha::{encoding, parser, service};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 #[derive(Deserialize)]
 struct TestData {
@@ -13,7 +13,7 @@ struct TestData {
 
 #[derive(Deserialize)]
 struct TestEntry {
-    request: ContentRequest,
+    request: Box<RawValue>,
     expected_approved: bool,
 }
 
@@ -34,7 +34,8 @@ fn main() -> Result<()> {
     let mut decision_mismatches = 0;
 
     for entry in data.entries {
-        let vector = encoding::vectorization(entry.request);
+        let request = parser::parse(entry.request.get().as_bytes())?;
+        let vector = encoding::vectorization(&request);
         let score = service::fraud_score(&vector); // ,&references // injeta as referencias necessárias para o cálculo
         let approved = score < 0.6;
 

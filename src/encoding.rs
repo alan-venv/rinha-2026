@@ -1,15 +1,13 @@
-use chrono::{DateTime, Datelike, Timelike, Utc};
-
-use crate::dto::{ContentRequest, LastTransaction};
+use crate::dto::{LastTransaction, RequestInput};
 
 const N: [f64; 7] = [10000.0, 12.0, 10.0, 1440.0, 1000.0, 20.0, 10000.0];
 const R0: f32 = 0.5;
 const RK: [u16; 10] = [4511, 5311, 5411, 5812, 5912, 5944, 5999, 7801, 7802, 7995];
 const RV: [f32; 10] = [0.35, 0.25, 0.15, 0.30, 0.20, 0.45, 0.50, 0.80, 0.75, 0.85];
 
-pub fn vectorization(request: ContentRequest) -> [i16; 14] {
+pub fn vectorization(request: &RequestInput<'_>) -> [i16; 14] {
     let transaction = &request.transaction;
-    let last_transaction = &request.last_transaction;
+    let last_transaction = request.last_transaction;
     let customer = &request.customer;
     let merchant = &request.merchant;
     let terminal = &request.terminal;
@@ -17,16 +15,16 @@ pub fn vectorization(request: ContentRequest) -> [i16; 14] {
     let n0 = n0(transaction.amount);
     let n1 = n1(transaction.installments);
     let n2 = n2(transaction.amount, customer.avg_amount);
-    let n3 = n3(&transaction.requested_at);
-    let n4 = n4(&transaction.requested_at);
-    let n5 = n5(&transaction.requested_at, last_transaction);
-    let n6 = n6(last_transaction);
+    let n3 = n3_input(transaction.requested_at.hour);
+    let n4 = n4_input(transaction.requested_at.weekday_from_monday);
+    let n5 = n5_input(transaction.requested_at.total_seconds(), last_transaction);
+    let n6 = n6_input(last_transaction);
     let n7 = n7(terminal.km_from_home);
     let n8 = n8(customer.tx_count_24h);
     let n9 = n9(terminal.is_online);
     let n10 = n10(terminal.card_present);
-    let n11 = n11(&customer.known_merchants, &merchant.id);
-    let n12 = n12(&merchant.mcc);
+    let n11 = n11_input(customer.known_merchants.contains(merchant.id));
+    let n12 = n12(merchant.mcc);
     let n13 = n13(merchant.avg_amount);
 
     [n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13].map(q)
@@ -44,26 +42,25 @@ fn n2(amount: f64, avg_amount: f64) -> f32 {
     c((amount / avg_amount) / N[2])
 }
 
-fn n3(requested_at: &DateTime<Utc>) -> f32 {
-    requested_at.hour() as f32 / 23.0
+fn n3_input(hour: u8) -> f32 {
+    hour as f32 / 23.0
 }
 
-fn n4(requested_at: &DateTime<Utc>) -> f32 {
-    requested_at.weekday().num_days_from_monday() as f32 / 6.0
+fn n4_input(weekday_from_monday: u8) -> f32 {
+    weekday_from_monday as f32 / 6.0
 }
 
-fn n5(requested_at: &DateTime<Utc>, last_transaction: &Option<LastTransaction>) -> f32 {
-    last_transaction.as_ref().map_or(-1.0, |last_transaction| {
-        c(requested_at
-            .signed_duration_since(last_transaction.timestamp)
-            .num_minutes()
-            .max(0) as f64
-            / N[3])
+fn n5_input(requested_at_seconds: i64, last_transaction: Option<LastTransaction>) -> f32 {
+    last_transaction.map_or(-1.0, |last_transaction| {
+        let minutes =
+            ((requested_at_seconds - last_transaction.timestamp.total_seconds()) / 60).max(0);
+
+        c(minutes as f64 / N[3])
     })
 }
 
-fn n6(last_transaction: &Option<LastTransaction>) -> f32 {
-    last_transaction.as_ref().map_or(
+fn n6_input(last_transaction: Option<LastTransaction>) -> f32 {
+    last_transaction.map_or(
         -1.0,
         |last_transaction| n7(last_transaction.km_from_current),
     )
@@ -85,8 +82,8 @@ fn n10(card_present: bool) -> f32 {
     card_present as u8 as f32
 }
 
-fn n11(known_merchants: &[String], merchant_id: &str) -> f32 {
-    (!known_merchants.iter().any(|known| known == merchant_id)) as u8 as f32
+fn n11_input(merchant_known: bool) -> f32 {
+    (!merchant_known) as u8 as f32
 }
 
 fn n12(mcc: &str) -> f32 {
@@ -115,36 +112,36 @@ fn q(x: f32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::{Customer, Merchant, Transaction};
-    use chrono::{DateTime, TimeZone, Utc};
+    use crate::dto::FastTimestamp;
 
-    fn utc(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(year, month, day, hour, min, sec)
-            .unwrap()
-    }
-
-    fn transaction(requested_at: DateTime<Utc>) -> Transaction {
-        Transaction {
-            amount: 0.0,
-            installments: 0.0,
-            requested_at,
-        }
-    }
-
-    fn customer(known_merchants: Vec<String>) -> Customer {
-        Customer {
-            avg_amount: 0.0,
-            tx_count_24h: 0.0,
-            known_merchants,
-        }
-    }
-
-    fn merchant(id: &str) -> Merchant {
-        Merchant {
-            id: id.to_string(),
-            mcc: String::new(),
-            avg_amount: 0.0,
-        }
+    fn sample_json() -> &'static [u8] {
+        br#"{
+            "id": "tx-3576980410",
+            "transaction": {
+                "amount": 384.88,
+                "installments": 3,
+                "requested_at": "2026-03-11T20:23:35Z"
+            },
+            "customer": {
+                "avg_amount": 769.76,
+                "tx_count_24h": 3,
+                "known_merchants": ["MERC-009", "MERC-009", "MERC-001", "MERC-001"]
+            },
+            "merchant": {
+                "id": "MERC-001",
+                "mcc": "5912",
+                "avg_amount": 298.95
+            },
+            "terminal": {
+                "is_online": false,
+                "card_present": true,
+                "km_from_home": 13.7090520965
+            },
+            "last_transaction": {
+                "timestamp": "2026-03-11T14:58:35Z",
+                "km_from_current": 18.8626479774
+            }
+        }"#
     }
 
     #[test]
@@ -176,75 +173,100 @@ mod tests {
 
     #[test]
     fn calculates_normalized_minutes_since_last_transaction() {
-        let transaction = transaction(utc(2026, 3, 11, 20, 23, 35));
+        let requested_at = FastTimestamp::parse("2026-03-11T20:23:35Z").unwrap();
         let last_transaction = LastTransaction {
-            timestamp: utc(2026, 3, 11, 14, 58, 35),
+            timestamp: FastTimestamp::parse("2026-03-11T14:58:35Z").unwrap(),
             km_from_current: 0.0,
         };
 
         assert_eq!(
-            n5(&transaction.requested_at, &Some(last_transaction)),
+            n5_input(requested_at.total_seconds(), Some(last_transaction)),
             (325.0 / N[3]) as f32
         );
     }
 
     #[test]
     fn returns_minus_one_when_last_transaction_is_missing() {
-        let transaction = transaction(utc(2026, 3, 11, 20, 23, 35));
+        let requested_at = FastTimestamp::parse("2026-03-11T20:23:35Z").unwrap();
 
-        assert_eq!(n5(&transaction.requested_at, &None), -1.0);
+        assert_eq!(n5_input(requested_at.total_seconds(), None), -1.0);
     }
 
     #[test]
     fn does_not_return_negative_minutes() {
-        let transaction = transaction(utc(2026, 3, 11, 20, 23, 35));
+        let requested_at = FastTimestamp::parse("2026-03-11T20:23:35Z").unwrap();
         let last_transaction = LastTransaction {
-            timestamp: utc(2026, 3, 11, 21, 23, 35),
+            timestamp: FastTimestamp::parse("2026-03-11T21:23:35Z").unwrap(),
             km_from_current: 0.0,
         };
 
-        assert_eq!(n5(&transaction.requested_at, &Some(last_transaction)), 0.0);
+        assert_eq!(
+            n5_input(requested_at.total_seconds(), Some(last_transaction)),
+            0.0
+        );
     }
 
     #[test]
     fn calculates_normalized_km_from_last_transaction() {
         let last_transaction = LastTransaction {
-            timestamp: utc(2026, 3, 11, 14, 58, 35),
+            timestamp: FastTimestamp::parse("2026-03-11T14:58:35Z").unwrap(),
             km_from_current: 250.0,
         };
 
-        assert_eq!(n6(&Some(last_transaction)), 0.25);
+        assert_eq!(n6_input(Some(last_transaction)), 0.25);
     }
 
     #[test]
     fn clamps_km_from_last_transaction() {
         let last_transaction = LastTransaction {
-            timestamp: utc(2026, 3, 11, 14, 58, 35),
+            timestamp: FastTimestamp::parse("2026-03-11T14:58:35Z").unwrap(),
             km_from_current: 2_000.0,
         };
 
-        assert_eq!(n6(&Some(last_transaction)), 1.0);
+        assert_eq!(n6_input(Some(last_transaction)), 1.0);
     }
 
     #[test]
     fn returns_minus_one_when_last_transaction_km_is_missing() {
-        assert_eq!(n6(&None), -1.0);
+        assert_eq!(n6_input(None), -1.0);
     }
 
     #[test]
     fn returns_zero_for_known_merchant() {
-        let customer = customer(vec!["MERC-001".to_string()]);
-        let merchant = merchant("MERC-001");
+        let request = crate::parser::parse(sample_json()).unwrap();
 
-        assert_eq!(n11(&customer.known_merchants, &merchant.id), 0.0);
+        assert_eq!(vectorization(&request)[11], 0);
     }
 
     #[test]
     fn returns_one_for_unknown_merchant() {
-        let customer = customer(vec!["MERC-001".to_string()]);
-        let merchant = merchant("MERC-002");
+        let unknown = br#"{
+            "id": "tx-1",
+            "transaction": {
+                "amount": 384.88,
+                "installments": 3,
+                "requested_at": "2026-03-11T20:23:35Z"
+            },
+            "customer": {
+                "avg_amount": 769.76,
+                "tx_count_24h": 3,
+                "known_merchants": ["MERC-009"]
+            },
+            "merchant": {
+                "id": "MERC-001",
+                "mcc": "5912",
+                "avg_amount": 298.95
+            },
+            "terminal": {
+                "is_online": false,
+                "card_present": true,
+                "km_from_home": 13.7
+            },
+            "last_transaction": null
+        }"#;
+        let request = crate::parser::parse(unknown).unwrap();
 
-        assert_eq!(n11(&customer.known_merchants, &merchant.id), 1.0);
+        assert_eq!(vectorization(&request)[11], 10_000);
     }
 
     #[test]
@@ -262,5 +284,26 @@ mod tests {
     fn uses_default_for_unknown_or_invalid_mcc() {
         assert_eq!(n12("0000"), R0);
         assert_eq!(n12("invalid"), R0);
+    }
+
+    #[test]
+    fn vector_from_request_matches_expected_sample_dimensions() {
+        let request = crate::parser::parse(sample_json()).unwrap();
+        let vector = vectorization(&request);
+
+        assert_eq!(vector[0], 385);
+        assert_eq!(vector[1], 2500);
+        assert_eq!(vector[2], 500);
+        assert_eq!(vector[3], 8696);
+        assert_eq!(vector[4], 3333);
+        assert_eq!(vector[5], 2257);
+        assert_eq!(vector[6], 189);
+        assert_eq!(vector[7], 137);
+        assert_eq!(vector[8], 1500);
+        assert_eq!(vector[9], 0);
+        assert_eq!(vector[10], 10_000);
+        assert_eq!(vector[11], 0);
+        assert_eq!(vector[12], 2000);
+        assert_eq!(vector[13], 299);
     }
 }
