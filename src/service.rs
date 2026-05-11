@@ -1,6 +1,5 @@
-// recebe "references" necessárias para realizar a comparação via parametro da função
-pub fn fraud_score(_vector: &[i16; 14]) -> f32 {
-    // let result = nearest(vector, references);      // calcula o top-5 mais próximos
-    // let score = score_from_nearest_result(result)  // calcula o score final
-    return 1.0;
+use crate::morton::MortonIndex;
+
+pub fn fraud_score(vector: &[i16; 14], index: &MortonIndex) -> f32 {
+    index.fraud_score(vector)
 }

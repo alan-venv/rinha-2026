@@ -43,6 +43,10 @@ impl ReferenceDataset {
         self.vectors[index]
     }
 
+    pub fn label_at(&self, index: usize) -> u8 {
+        (self.fraud_bits[index / 8] >> (index % 8)) & 1
+    }
+
     fn quantize_vector(vector: &[f32; 14]) -> [i16; 14] {
         let mut quantized = [0; 14];
         for (output, input) in quantized[..14].iter_mut().zip(vector) {

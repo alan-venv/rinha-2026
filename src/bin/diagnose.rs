@@ -2,7 +2,7 @@ use std::fs::File;
 use std::time::Instant;
 
 use anyhow::Result;
-use rinha::{encoding, parser, service};
+use rinha::{encoding, morton::MortonIndex, parser, service};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -25,7 +25,7 @@ struct Diagnose {
 }
 
 fn main() -> Result<()> {
-    //let references = ... ; // carrega as referencias que foram buildadas pelo /src/bin/index
+    let index = MortonIndex::load_default()?;
     let input = File::open("scripts/k6/data.json")?;
     let data: TestData = serde_json::from_reader(input)?;
     let total = data.entries.len();
@@ -36,7 +36,7 @@ fn main() -> Result<()> {
     for entry in data.entries {
         let request = parser::parse(entry.request.get().as_bytes())?;
         let vector = encoding::vectorization(&request);
-        let score = service::fraud_score(&vector); // ,&references // injeta as referencias necessárias para o cálculo
+        let score = service::fraud_score(&vector, &index);
         let approved = score < 0.6;
 
         if approved == entry.expected_approved {

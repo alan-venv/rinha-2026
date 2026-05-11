@@ -2,22 +2,23 @@ use std::io::Result;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use actix_web::web::Data;
 use actix_web::{App, HttpServer};
 use mimalloc::MiMalloc;
 use rinha::controller;
+use rinha::morton::MortonIndex;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
 #[actix_web::main]
 async fn main() -> Result<()> {
-    //let references = memory::load_references();
-    //let references = Data::new(references);
+    let index = Data::new(MortonIndex::load_default()?);
 
     let socket = socket();
     let server = HttpServer::new(move || {
         App::new()
-            //.app_data(references.clone())
+            .app_data(index.clone())
             .service(controller::ready)
             .service(controller::score)
     })
