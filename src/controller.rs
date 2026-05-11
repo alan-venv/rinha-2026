@@ -1,5 +1,9 @@
-use actix_web::web::Bytes;
+use actix_web::web::{Bytes, Json};
 use actix_web::{HttpResponse, Responder, get, post};
+
+use crate::dto::ContentRequest;
+use crate::encoding;
+use crate::service;
 
 #[get("/ready")]
 pub async fn ready() -> impl Responder {
@@ -8,11 +12,9 @@ pub async fn ready() -> impl Responder {
 
 #[post("/fraud-score")]
 // recebe references por "Data" do actix via parametro aqui
-pub async fn score(_body: Bytes) -> HttpResponse {
-    // let vector = encoding::vectorization(request.0);
-    // let fraud_score = service::fraud_score(&vector); // ,references.as_ref()
-
-    let fraud_score = 0.0;
+pub async fn score(request: Json<ContentRequest>) -> HttpResponse {
+    let vector = encoding::vectorization(request.0);
+    let fraud_score = service::fraud_score(&vector); // ,references.as_ref()
 
     HttpResponse::Ok()
         .content_type("application/json")
