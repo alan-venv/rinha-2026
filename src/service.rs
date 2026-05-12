@@ -4,17 +4,6 @@ pub struct Service {
     morton: MortonIndex,
 }
 
-pub struct FraudDecision {
-    pub fraud_score: f32,
-    pub source: DecisionSource,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum DecisionSource {
-    Morton,
-    Boundary,
-}
-
 impl Service {
     pub fn new(morton: MortonIndex) -> Self {
         Self { morton }
@@ -37,4 +26,14 @@ impl Service {
             source: DecisionSource::Boundary,
         }
     }
+}
+
+pub struct FraudDecision {
+    pub fraud_score: f32,
+    pub source: DecisionSource,
+}
+
+pub enum DecisionSource {
+    Morton,
+    Boundary,
 }
