@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
-use memmap2::Mmap;
+use memmap2::{Advice, Mmap};
 
 const MAGIC: &[u8; 8] = b"RMORTON1";
 const VERSION: u32 = 1;
@@ -57,6 +57,8 @@ impl MortonIndex {
                 "invalid morton index length",
             ));
         }
+        mmap.advise(Advice::WillNeed)?;
+        warmup(&mmap);
 
         Ok(Self {
             mmap,
@@ -224,6 +226,22 @@ fn morton_window() -> usize {
 
 fn top_frauds<const K: usize>(top: &[(u32, u8); K]) -> usize {
     top.iter().filter(|(_, label)| *label == 1).count()
+}
+
+fn warmup(mmap: &Mmap) {
+    let mut checksum = 0_u8;
+    let mut offset = 0;
+
+    while offset < mmap.len() {
+        checksum ^= mmap[offset];
+        offset += 4096;
+    }
+
+    if let Some(last) = mmap.last() {
+        checksum ^= *last;
+    }
+
+    std::hint::black_box(checksum);
 }
 
 #[cfg(test)]
