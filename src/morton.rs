@@ -150,8 +150,8 @@ pub fn morton_key(vector: &[i16; DIMENSIONS]) -> u128 {
     let mut key = 0_u128;
 
     for bit in 0..8 {
-        for value in vector {
-            let byte = quantize_to_byte(*value);
+        for (dimension, value) in vector.iter().enumerate() {
+            let byte = quantize_to_byte(dimension, *value);
             let source_bit = (byte >> (7 - bit)) & 1;
             key = (key << 1) | source_bit as u128;
         }
@@ -160,7 +160,19 @@ pub fn morton_key(vector: &[i16; DIMENSIONS]) -> u128 {
     key
 }
 
-fn quantize_to_byte(value: i16) -> u8 {
+fn quantize_to_byte(dimension: usize, value: i16) -> u8 {
+    match dimension {
+        5 | 6 => quantize_optional(value),
+        _ => quantize_normal(value),
+    }
+}
+
+fn quantize_normal(value: i16) -> u8 {
+    let clamped = (value as i32).clamp(0, 10_000) as u32;
+    ((clamped * 255 + 5_000) / 10_000) as u8
+}
+
+fn quantize_optional(value: i16) -> u8 {
     let shifted = (value as i32 + 10_000).clamp(0, 20_000) as u32;
     ((shifted * 255 + 10_000) / 20_000) as u8
 }
@@ -193,7 +205,7 @@ fn morton_window() -> usize {
     std::env::var("MORTON_WINDOW")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(1024)
+        .unwrap_or(4096)
 }
 
 #[cfg(test)]
@@ -201,10 +213,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quantizes_vector_bounds_to_byte_range() {
-        assert_eq!(quantize_to_byte(-10_000), 0);
-        assert_eq!(quantize_to_byte(0), 128);
-        assert_eq!(quantize_to_byte(10_000), 255);
+    fn quantizes_normal_dimensions_to_full_byte_range() {
+        assert_eq!(quantize_to_byte(0, -10_000), 0);
+        assert_eq!(quantize_to_byte(0, 0), 0);
+        assert_eq!(quantize_to_byte(0, 5_000), 128);
+        assert_eq!(quantize_to_byte(0, 10_000), 255);
+    }
+
+    #[test]
+    fn quantizes_optional_dimensions_with_missing_sentinel() {
+        assert_eq!(quantize_to_byte(5, -10_000), 0);
+        assert_eq!(quantize_to_byte(5, 0), 128);
+        assert_eq!(quantize_to_byte(5, 5_000), 191);
+        assert_eq!(quantize_to_byte(5, 10_000), 255);
+        assert_eq!(quantize_to_byte(6, -10_000), 0);
     }
 
     #[test]
