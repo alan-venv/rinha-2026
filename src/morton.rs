@@ -9,7 +9,8 @@ const VERSION: u32 = 1;
 const HEADER_LEN: usize = 20;
 const ENTRY_LEN: usize = 45;
 const DIMENSIONS: usize = 14;
-const TOP_K: usize = 5;
+const FAST_K: usize = 11;
+const FAST_D11_LIMIT: u32 = 5_000;
 
 #[derive(Clone, Copy)]
 pub struct MortonEntry {
@@ -81,34 +82,47 @@ impl MortonIndex {
         output.flush()
     }
 
-    pub fn fraud_score(&self, vector: &[i16; DIMENSIONS]) -> f32 {
+    pub fn score(&self, vector: &[i16; DIMENSIONS]) -> Option<f32> {
+        let top = self.top_neighbors::<FAST_K>(vector);
+        let distance = top[FAST_K - 1].0;
+        if distance > FAST_D11_LIMIT {
+            return None;
+        }
+
+        match top_frauds(&top) {
+            0 => Some(0.0),
+            FAST_K => Some(1.0),
+            _ => None,
+        }
+    }
+
+    fn top_neighbors<const K: usize>(&self, vector: &[i16; DIMENSIONS]) -> [(u32, u8); K] {
+        let mut best = [(u32::MAX, 0_u8); K];
         if self.count == 0 {
-            return 0.0;
+            return best;
         }
 
         let key = morton_key(vector);
         let position = self.lower_bound(key);
         let start = position.saturating_sub(self.window);
         let end = (position + self.window + 1).min(self.count);
-        let mut best = [(u32::MAX, 0_u8); TOP_K];
 
         for index in start..end {
             let entry = self.entry_at(index);
             let distance = l1_distance(vector, &entry.vector);
-            if distance >= best[TOP_K - 1].0 {
+            if distance >= best[K - 1].0 {
                 continue;
             }
 
-            let mut index = TOP_K - 1;
-            while index > 0 && distance < best[index - 1].0 {
-                best[index] = best[index - 1];
-                index -= 1;
+            let mut output = K - 1;
+            while output > 0 && distance < best[output - 1].0 {
+                best[output] = best[output - 1];
+                output -= 1;
             }
-            best[index] = (distance, entry.label);
+            best[output] = (distance, entry.label);
         }
 
-        let frauds = best.iter().filter(|(_, label)| *label == 1).count();
-        frauds as f32 / TOP_K as f32
+        best
     }
 
     fn lower_bound(&self, key: u128) -> usize {
@@ -205,7 +219,11 @@ fn morton_window() -> usize {
     std::env::var("MORTON_WINDOW")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(4096)
+        .unwrap_or(512)
+}
+
+fn top_frauds<const K: usize>(top: &[(u32, u8); K]) -> usize {
+    top.iter().filter(|(_, label)| *label == 1).count()
 }
 
 #[cfg(test)]

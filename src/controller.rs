@@ -3,9 +3,8 @@ use actix_web::web::Data;
 use actix_web::{HttpResponse, Responder, get, post};
 
 use crate::encoding;
-use crate::morton::MortonIndex;
 use crate::parser;
-use crate::service;
+use crate::service::Service;
 
 #[get("/ready")]
 pub async fn ready() -> impl Responder {
@@ -13,12 +12,12 @@ pub async fn ready() -> impl Responder {
 }
 
 #[post("/fraud-score")]
-pub async fn score(body: Bytes, index: Data<MortonIndex>) -> HttpResponse {
+pub async fn score(body: Bytes, service: Data<Service>) -> HttpResponse {
     let Ok(request) = parser::parse(&body) else {
         return HttpResponse::BadRequest().finish();
     };
     let vector = encoding::vectorization(&request);
-    let score = service::fraud_score(&vector, index.as_ref());
+    let score = service.fraud_score(&vector);
 
     HttpResponse::Ok()
         .content_type("application/json")

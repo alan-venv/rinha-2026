@@ -35,8 +35,8 @@ impl ReferenceDataset {
         self.vectors.len()
     }
 
-    pub fn fraud_bits(&self) -> &[u8] {
-        &self.fraud_bits
+    pub fn is_empty(&self) -> bool {
+        self.vectors.is_empty()
     }
 
     pub fn vector_at(&self, index: usize) -> [i16; 14] {
