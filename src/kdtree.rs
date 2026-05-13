@@ -84,6 +84,7 @@ impl KdTree {
         }
 
         mmap.advise(Advice::WillNeed)?;
+        warmup(&mmap);
 
         Ok(Self {
             mmap,
@@ -381,4 +382,20 @@ fn l2_distance(left: &[i16; DIMENSIONS], right: &[i16; DIMENSIONS]) -> u64 {
 
 fn invalid_length() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid kd-tree index length")
+}
+
+fn warmup(mmap: &Mmap) {
+    let mut checksum = 0_u8;
+    let mut offset = 0;
+
+    while offset < mmap.len() {
+        checksum ^= mmap[offset];
+        offset += 4096;
+    }
+
+    if let Some(last) = mmap.last() {
+        checksum ^= *last;
+    }
+
+    std::hint::black_box(checksum);
 }
