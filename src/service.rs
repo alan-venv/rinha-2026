@@ -1,12 +1,14 @@
-use crate::morton::MortonIndex;
+use crate::{kdtree::KdTree, morton::MortonIndex};
 
 pub struct Service {
     morton: MortonIndex,
+    kdtree: KdTree,
 }
 
 impl Service {
     pub fn new(morton: MortonIndex) -> Self {
-        Self { morton }
+        let kdtree = KdTree::build(&morton);
+        Self { morton, kdtree }
     }
 
     pub fn fraud_score(&self, vector: &[i16; 14]) -> f32 {
@@ -22,7 +24,7 @@ impl Service {
         }
 
         FraudDecision {
-            fraud_score: 1.0,
+            fraud_score: self.kdtree.score(&self.morton, vector),
             source: DecisionSource::Boundary,
         }
     }

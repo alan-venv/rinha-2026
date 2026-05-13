@@ -98,6 +98,10 @@ impl MortonIndex {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
     fn top_neighbors<const K: usize>(&self, vector: &[i16; DIMENSIONS]) -> [(u32, u8); K] {
         let mut best = [(u32::MAX, 0_u8); K];
         if self.count == 0 {
@@ -143,7 +147,7 @@ impl MortonIndex {
         left
     }
 
-    fn entry_at(&self, index: usize) -> MortonEntry {
+    pub(crate) fn entry_at(&self, index: usize) -> MortonEntry {
         let start = HEADER_LEN + (index * ENTRY_LEN);
         decode_entry(&self.mmap[start..start + ENTRY_LEN])
     }
