@@ -6,8 +6,7 @@ pub struct Service {
 }
 
 impl Service {
-    pub fn new(morton: MortonIndex) -> Self {
-        let kdtree = KdTree::build(&morton);
+    pub fn new(morton: MortonIndex, kdtree: KdTree) -> Self {
         Self { morton, kdtree }
     }
 
@@ -25,7 +24,7 @@ impl Service {
 
         FraudDecision {
             fraud_score: self.kdtree.score(&self.morton, vector),
-            source: DecisionSource::Boundary,
+            source: DecisionSource::KdTree,
         }
     }
 }
@@ -37,5 +36,5 @@ pub struct FraudDecision {
 
 pub enum DecisionSource {
     Morton,
-    Boundary,
+    KdTree,
 }

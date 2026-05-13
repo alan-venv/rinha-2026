@@ -2,6 +2,7 @@ pub mod reference;
 pub mod structs;
 
 use anyhow::Result;
+use rinha::kdtree::KdTreeBuilder;
 use rinha::morton::{self, MortonIndex};
 
 use crate::reference::ReferenceDataset;
@@ -20,6 +21,14 @@ fn main() -> Result<()> {
     entries.sort_unstable_by_key(|entry| entry.key);
     MortonIndex::write("resources/index.bin", &entries)?;
     println!("wrote {} morton entries", entries.len());
+
+    let kdtree = KdTreeBuilder::build(&entries)?;
+    kdtree.write("resources/kdtree.bin")?;
+    println!(
+        "wrote {} kd-tree nodes and {} kd-tree indices",
+        kdtree.nodes_len(),
+        kdtree.indices_len()
+    );
 
     Ok(())
 }
