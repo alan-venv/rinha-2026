@@ -5,7 +5,7 @@ const R0: f32 = 0.5;
 const RK: [u16; 10] = [4511, 5311, 5411, 5812, 5912, 5944, 5999, 7801, 7802, 7995];
 const RV: [f32; 10] = [0.35, 0.25, 0.15, 0.30, 0.20, 0.45, 0.50, 0.80, 0.75, 0.85];
 
-pub fn vectorization(request: &RequestInput<'_>) -> [i16; 14] {
+pub fn vectorization(request: &RequestInput<'_>) -> [i16; 16] {
     let transaction = &request.transaction;
     let last_transaction = request.last_transaction;
     let customer = &request.customer;
@@ -27,7 +27,10 @@ pub fn vectorization(request: &RequestInput<'_>) -> [i16; 14] {
     let n12 = n12(merchant.mcc);
     let n13 = n13(merchant.avg_amount);
 
-    [n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13].map(q)
+    [
+        n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, 0.0, 0.0,
+    ]
+    .map(q)
 }
 
 fn n0(amount: f64) -> f32 {
@@ -305,5 +308,7 @@ mod tests {
         assert_eq!(vector[11], 0);
         assert_eq!(vector[12], 2000);
         assert_eq!(vector[13], 299);
+        assert_eq!(vector[14], 0);
+        assert_eq!(vector[15], 0);
     }
 }

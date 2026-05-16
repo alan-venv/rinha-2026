@@ -10,11 +10,11 @@ impl Service {
         Self { morton, kdtree }
     }
 
-    pub fn fraud_score(&self, vector: &[i16; 14]) -> f32 {
+    pub fn fraud_score(&self, vector: &[i16; 16]) -> f32 {
         self.decide(vector).fraud_score
     }
 
-    pub fn decide(&self, vector: &[i16; 14]) -> FraudDecision {
+    pub fn decide(&self, vector: &[i16; 16]) -> FraudDecision {
         if let Some(fraud_score) = self.morton.score(vector) {
             return FraudDecision {
                 fraud_score,

@@ -6,7 +6,7 @@ use memmap2::Mmap;
 use crate::structs::{JsonLabel, ReferenceJson};
 
 pub struct ReferenceDataset {
-    pub vectors: Vec<[i16; 14]>,
+    pub vectors: Vec<[i16; 16]>,
     pub fraud_bits: Vec<u8>,
 }
 
@@ -39,7 +39,7 @@ impl ReferenceDataset {
         self.vectors.is_empty()
     }
 
-    pub fn vector_at(&self, index: usize) -> [i16; 14] {
+    pub fn vector_at(&self, index: usize) -> [i16; 16] {
         self.vectors[index]
     }
 
@@ -47,8 +47,8 @@ impl ReferenceDataset {
         (self.fraud_bits[index / 8] >> (index % 8)) & 1
     }
 
-    fn quantize_vector(vector: &[f32; 14]) -> [i16; 14] {
-        let mut quantized = [0; 14];
+    fn quantize_vector(vector: &[f32; 14]) -> [i16; 16] {
+        let mut quantized = [0; 16];
         for (output, input) in quantized[..14].iter_mut().zip(vector) {
             *output = (*input * 10_000.0).round() as i16;
         }
