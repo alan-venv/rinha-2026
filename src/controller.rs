@@ -1,37 +1,36 @@
-use actix_web::web::Bytes;
-use actix_web::web::Data;
-use actix_web::{HttpResponse, Responder, get, post};
+use std::io;
 
 use crate::encoding;
 use crate::parser;
+use crate::response::fraud_response;
 use crate::service::Service;
+use umbral_socket::stream::UmbralResponse;
 
-#[get("/ready")]
-pub async fn ready() -> impl Responder {
-    HttpResponse::Ok().body("I was born ready")
+pub const READY_RESPONSE: &[u8] = b"I was born ready";
+pub const FRAUD_SCORE_METHOD: u8 = 1;
+pub const READY_METHOD: u8 = 2;
+
+pub fn ready() -> &'static [u8] {
+    READY_RESPONSE
 }
 
-#[post("/fraud-score")]
-pub async fn score(body: Bytes, service: Data<Service>) -> HttpResponse {
-    let Ok(request) = parser::parse(&body) else {
-        return HttpResponse::BadRequest().finish();
-    };
+pub fn score(service: &Service, body: &[u8]) -> io::Result<&'static [u8]> {
+    let request = parser::parse(body)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid request"))?;
     let vector = encoding::vectorization(&request);
     let score = service.fraud_score(&vector);
 
-    HttpResponse::Ok()
-        .content_type("application/json")
-        .body(response(score))
+    Ok(fraud_response(score))
 }
 
-fn response(fraud_score: f32) -> Bytes {
-    const RESPONSES: [&[u8]; 6] = [
-        br#"{"approved":true,"fraud_score":0.0}"#,
-        br#"{"approved":true,"fraud_score":0.2}"#,
-        br#"{"approved":true,"fraud_score":0.4}"#,
-        br#"{"approved":false,"fraud_score":0.6}"#,
-        br#"{"approved":false,"fraud_score":0.8}"#,
-        br#"{"approved":false,"fraud_score":1.0}"#,
-    ];
-    Bytes::from_static(RESPONSES[(fraud_score * 5.0).round() as usize])
+pub fn score_handler(
+    service: &Service,
+    payload: &[u8],
+    _: &mut Vec<u8>,
+) -> io::Result<UmbralResponse> {
+    Ok(UmbralResponse::Static(score(service, payload)?))
+}
+
+pub fn ready_handler(_: &Service, _: &[u8], _: &mut Vec<u8>) -> io::Result<UmbralResponse> {
+    Ok(UmbralResponse::Static(ready()))
 }
