@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::io::{self, IoSlice, Read, Result, Write};
+use std::io::{self, Read, Result, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::Path;
@@ -8,7 +7,9 @@ use std::slice;
 use mio::net::{UnixListener, UnixStream};
 use mio::{Events, Interest, Poll, Token};
 
-use super::protocol::{MethodId, REQUEST_HEADER_LEN, UmbralConfig, UmbralStatus};
+use super::protocol::{
+    MAX_PAYLOAD_LEN, MethodId, REQUEST_HEADER_LEN, SOCKET_PERMISSIONS, UmbralStatus,
+};
 
 const SERVER: Token = Token(0);
 const CONNECTION_START: usize = 1;
@@ -18,13 +19,11 @@ type Handler<S> = fn(&S, &[u8]) -> io::Result<&'static [u8]>;
 pub struct UmbralServer<S> {
     state: S,
     handlers: [Option<Handler<S>>; 256],
-    config: UmbralConfig,
 }
 
 struct Connection {
     stream: UnixStream,
     state: ConnectionState,
-    close_after_write: bool,
     header: [u8; REQUEST_HEADER_LEN],
     header_offset: usize,
     request: Vec<u8>,
@@ -44,14 +43,9 @@ enum ConnectionState {
 
 impl<S> UmbralServer<S> {
     pub fn new(state: S) -> Self {
-        Self::with_config(state, UmbralConfig::default())
-    }
-
-    pub fn with_config(state: S, config: UmbralConfig) -> Self {
         Self {
             state,
             handlers: std::array::from_fn(|_| None),
-            config,
         }
     }
 
@@ -68,7 +62,7 @@ impl<S> UmbralServer<S> {
 
         let std_listener = StdUnixListener::bind(path)?;
         std_listener.set_nonblocking(true)?;
-        let permissions = std::fs::Permissions::from_mode(self.config.socket_permissions);
+        let permissions = std::fs::Permissions::from_mode(SOCKET_PERMISSIONS);
         std::fs::set_permissions(path, permissions)?;
 
         let mut listener = UnixListener::from_std(std_listener);
@@ -77,7 +71,7 @@ impl<S> UmbralServer<S> {
             .register(&mut listener, SERVER, Interest::READABLE)?;
 
         let mut events = Events::with_capacity(1024);
-        let mut connections = HashMap::new();
+        let mut connections = Vec::new();
         let mut next_token = CONNECTION_START;
 
         println!("Umbral Server listening on \"{}\"", socket);
@@ -111,10 +105,10 @@ impl<S> UmbralServer<S> {
         &self,
         registry: &mio::Registry,
         token: Token,
-        connections: &mut HashMap<Token, Connection>,
+        connections: &mut Vec<Option<Connection>>,
     ) -> Result<()> {
         loop {
-            let Some(connection) = connections.get_mut(&token) else {
+            let Some(connection) = connection_mut(connections, token) else {
                 return Ok(());
             };
 
@@ -122,17 +116,14 @@ impl<S> UmbralServer<S> {
                 return update_interest(registry, token, connections);
             }
 
-            match read_request(connection, self.config.max_payload_len) {
+            match read_request(connection, MAX_PAYLOAD_LEN) {
                 Ok(Some(method)) => {
                     self.handle_request(connection, method);
                     flush_connection(registry, token, connections)?;
                 }
                 Ok(None) => return update_interest(registry, token, connections),
                 Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                    if let Some(connection) = connections.get_mut(&token) {
-                        prepare_status(connection, UmbralStatus::PayloadTooLarge, true);
-                    }
-                    flush_connection(registry, token, connections)?;
+                    remove_connection(registry, token, connections)?;
                     return Ok(());
                 }
                 Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
@@ -146,21 +137,21 @@ impl<S> UmbralServer<S> {
 
     fn handle_request(&self, connection: &mut Connection, method: MethodId) {
         let Some(handler) = self.handlers[method as usize] else {
-            prepare_status(connection, UmbralStatus::MethodNotFound, false);
+            prepare_status(connection, UmbralStatus::MethodNotFound);
             return;
         };
 
         match handler(&self.state, &connection.request) {
             Ok(payload) => {
-                if payload.len() > self.config.max_payload_len {
-                    prepare_status(connection, UmbralStatus::HandlerError, false);
+                if payload.len() > MAX_PAYLOAD_LEN {
+                    prepare_status(connection, UmbralStatus::HandlerError);
                     return;
                 }
 
-                prepare_response(connection, UmbralStatus::Ok, payload, false);
+                prepare_response(connection, UmbralStatus::Ok, payload);
             }
             Err(_) => {
-                prepare_status(connection, UmbralStatus::HandlerError, false);
+                prepare_status(connection, UmbralStatus::HandlerError);
             }
         }
     }
@@ -171,7 +162,6 @@ impl Connection {
         Self {
             stream,
             state: ConnectionState::ReadingHeader,
-            close_after_write: false,
             header: [0; REQUEST_HEADER_LEN],
             header_offset: 0,
             request: Vec::new(),
@@ -185,7 +175,6 @@ impl Connection {
 
     fn reset_read(&mut self) {
         self.state = ConnectionState::ReadingHeader;
-        self.close_after_write = false;
         self.header = [0; REQUEST_HEADER_LEN];
         self.header_offset = 0;
         self.request.clear();
@@ -199,7 +188,7 @@ impl Connection {
 fn accept_connections(
     registry: &mio::Registry,
     listener: &mut UnixListener,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Vec<Option<Connection>>,
     next_token: &mut usize,
 ) -> Result<()> {
     loop {
@@ -213,7 +202,11 @@ fn accept_connections(
         let token = Token(*next_token);
         *next_token += 1;
         registry.register(&mut stream, token, Interest::READABLE)?;
-        connections.insert(token, Connection::new(stream));
+        let index = connection_index(token);
+        if connections.len() <= index {
+            connections.resize_with(index + 1, || None);
+        }
+        connections[index] = Some(Connection::new(stream));
     }
 }
 
@@ -303,136 +296,77 @@ fn read_into_spare(
     Ok(read)
 }
 
-fn prepare_status(connection: &mut Connection, status: UmbralStatus, close: bool) {
-    prepare_response(connection, status, b"", close);
+fn prepare_status(connection: &mut Connection, status: UmbralStatus) {
+    prepare_response(connection, status, b"");
 }
 
-fn prepare_response(
-    connection: &mut Connection,
-    status: UmbralStatus,
-    payload: &'static [u8],
-    close: bool,
-) {
+fn prepare_response(connection: &mut Connection, status: UmbralStatus, payload: &'static [u8]) {
     let len = payload.len() as u32;
     connection.write_header[0] = status as u8;
     connection.write_header[1..].copy_from_slice(&len.to_be_bytes());
     connection.write_header_offset = 0;
     connection.write_payload = payload;
     connection.write_payload_offset = 0;
-    connection.close_after_write = close;
     connection.state = ConnectionState::Writing;
 }
 
 fn flush_connection(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Vec<Option<Connection>>,
 ) -> Result<()> {
-    let Some(connection) = connections.get_mut(&token) else {
+    let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
     };
 
-    while connection.write_header_offset < connection.write_header.len()
-        || connection.write_payload_offset < connection.write_payload.len()
-    {
-        let written = write_pending(connection)?;
-        if written == 0 {
-            break;
-        }
-    }
-
-    if connection.write_header_offset == connection.write_header.len()
-        && connection.write_payload_offset == connection.write_payload.len()
-    {
-        if connection.close_after_write {
-            remove_connection(registry, token, connections)?;
-            return Ok(());
-        }
-
-        if let Some(connection) = connections.get_mut(&token) {
-            connection.reset_read();
-        }
+    if flush_write(connection)? {
+        connection.reset_read();
     }
 
     update_interest(registry, token, connections)
 }
 
-fn write_pending(connection: &mut Connection) -> Result<usize> {
-    if connection.write_header_offset == connection.write_header.len() {
-        return write_payload(connection);
-    }
-
-    let payload_len = connection.write_payload.len();
-    if connection.write_payload_offset == payload_len {
-        return match connection
+fn flush_write(connection: &mut Connection) -> Result<bool> {
+    while connection.write_header_offset < connection.write_header.len() {
+        match connection
             .stream
             .write(&connection.write_header[connection.write_header_offset..])
         {
-            Ok(written) => {
-                connection.write_header_offset += written;
-                Ok(written)
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
-            Err(error) => Err(error),
-        };
-    }
-
-    let written = {
-        let header = &connection.write_header[connection.write_header_offset..];
-        let payload = &connection.write_payload[connection.write_payload_offset..];
-        let stream = &mut connection.stream;
-
-        match stream.write_vectored(&[IoSlice::new(header), IoSlice::new(payload)]) {
-            Ok(written) => written,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(0),
+            Ok(0) => return write_zero(),
+            Ok(written) => connection.write_header_offset += written,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
             Err(error) => return Err(error),
         }
-    };
-
-    if written == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::WriteZero,
-            "failed to write umbral frame",
-        ));
     }
 
-    advance_write_offsets(connection, payload_len, written);
-    Ok(written)
-}
-
-fn write_payload(connection: &mut Connection) -> Result<usize> {
-    let written = {
-        let payload = &connection.write_payload[connection.write_payload_offset..];
-        let stream = &mut connection.stream;
-
-        match stream.write(payload) {
-            Ok(written) => written,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(0),
+    while connection.write_payload_offset < connection.write_payload.len() {
+        match connection
+            .stream
+            .write(&connection.write_payload[connection.write_payload_offset..])
+        {
+            Ok(0) => return write_zero(),
+            Ok(written) => connection.write_payload_offset += written,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
             Err(error) => return Err(error),
         }
-    };
+    }
 
-    connection.write_payload_offset += written;
-    Ok(written)
+    Ok(true)
 }
 
-fn advance_write_offsets(connection: &mut Connection, payload_len: usize, written: usize) {
-    let remaining_header = connection.write_header.len() - connection.write_header_offset;
-    if written < remaining_header {
-        connection.write_header_offset += written;
-    } else {
-        connection.write_header_offset = connection.write_header.len();
-        connection.write_payload_offset =
-            (connection.write_payload_offset + written - remaining_header).min(payload_len);
-    }
+fn write_zero<T>() -> Result<T> {
+    Err(io::Error::new(
+        io::ErrorKind::WriteZero,
+        "failed to write umbral frame",
+    ))
 }
 
 fn update_interest(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Vec<Option<Connection>>,
 ) -> Result<()> {
-    let Some(connection) = connections.get_mut(&token) else {
+    let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
     };
     let interest = if connection.state == ConnectionState::Writing {
@@ -446,10 +380,19 @@ fn update_interest(
 fn remove_connection(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Vec<Option<Connection>>,
 ) -> Result<()> {
-    if let Some(mut connection) = connections.remove(&token) {
+    let index = connection_index(token);
+    if let Some(mut connection) = connections.get_mut(index).and_then(Option::take) {
         registry.deregister(&mut connection.stream)?;
     }
     Ok(())
+}
+
+fn connection_index(token: Token) -> usize {
+    token.0 - CONNECTION_START
+}
+
+fn connection_mut(connections: &mut [Option<Connection>], token: Token) -> Option<&mut Connection> {
+    connections.get_mut(connection_index(token))?.as_mut()
 }

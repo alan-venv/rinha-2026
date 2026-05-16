@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use umbral_socket::stream::{DEFAULT_MAX_PAYLOAD_LEN, UmbralClient, UmbralServer};
+use umbral_socket::stream::{UmbralClient, UmbralServer};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -192,12 +192,6 @@ impl Config {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "concurrency must be greater than zero",
-            ));
-        }
-        if self.payload_bytes > DEFAULT_MAX_PAYLOAD_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("payload-bytes must be <= {DEFAULT_MAX_PAYLOAD_LEN}"),
             ));
         }
         Ok(())

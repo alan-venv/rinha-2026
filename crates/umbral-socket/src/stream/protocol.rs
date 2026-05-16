@@ -1,13 +1,13 @@
 use std::convert::TryFrom;
 use std::io::{self, IoSlice};
 use std::io::{Read, Write};
-use std::time::Duration;
 
 pub type MethodId = u8;
 
 pub const REQUEST_HEADER_LEN: usize = 5;
 pub const RESPONSE_HEADER_LEN: usize = 5;
-pub const DEFAULT_MAX_PAYLOAD_LEN: usize = 2 * 1024;
+pub(crate) const MAX_PAYLOAD_LEN: usize = 2 * 1024;
+pub(crate) const SOCKET_PERMISSIONS: u32 = 0o766;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,27 +33,6 @@ impl TryFrom<u8> for UmbralStatus {
                 io::ErrorKind::InvalidData,
                 "unknown umbral status",
             )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct UmbralConfig {
-    pub max_payload_len: usize,
-    pub socket_permissions: u32,
-    pub connect_timeout: Duration,
-    pub write_timeout: Duration,
-    pub read_timeout: Duration,
-}
-
-impl Default for UmbralConfig {
-    fn default() -> Self {
-        Self {
-            max_payload_len: DEFAULT_MAX_PAYLOAD_LEN,
-            socket_permissions: 0o766,
-            connect_timeout: Duration::from_millis(500),
-            write_timeout: Duration::from_millis(100),
-            read_timeout: Duration::from_millis(500),
         }
     }
 }
@@ -216,7 +195,7 @@ mod tests {
         write_request_sync(&mut buffer, 7, b"").unwrap();
 
         let (method, payload) =
-            read_request_sync(&mut Cursor::new(buffer), DEFAULT_MAX_PAYLOAD_LEN).unwrap();
+            read_request_sync(&mut Cursor::new(buffer), MAX_PAYLOAD_LEN).unwrap();
 
         assert_eq!(method, 7);
         assert!(payload.is_empty());
@@ -228,7 +207,7 @@ mod tests {
         write_request_sync(&mut buffer, 9, b"abc").unwrap();
 
         let (method, payload) =
-            read_request_sync(&mut Cursor::new(buffer), DEFAULT_MAX_PAYLOAD_LEN).unwrap();
+            read_request_sync(&mut Cursor::new(buffer), MAX_PAYLOAD_LEN).unwrap();
 
         assert_eq!(method, 9);
         assert_eq!(payload, b"abc");
@@ -240,7 +219,7 @@ mod tests {
         write_response_sync(&mut buffer, UmbralStatus::Ok, b"done").unwrap();
 
         let (status, payload) =
-            read_response_sync(&mut Cursor::new(buffer), DEFAULT_MAX_PAYLOAD_LEN).unwrap();
+            read_response_sync(&mut Cursor::new(buffer), MAX_PAYLOAD_LEN).unwrap();
 
         assert_eq!(status, UmbralStatus::Ok);
         assert_eq!(payload, b"done");
@@ -252,7 +231,7 @@ mod tests {
         write_response_sync(&mut buffer, UmbralStatus::MethodNotFound, b"").unwrap();
 
         let (status, payload) =
-            read_response_sync(&mut Cursor::new(buffer), DEFAULT_MAX_PAYLOAD_LEN).unwrap();
+            read_response_sync(&mut Cursor::new(buffer), MAX_PAYLOAD_LEN).unwrap();
 
         assert_eq!(status, UmbralStatus::MethodNotFound);
         assert!(payload.is_empty());
@@ -262,7 +241,7 @@ mod tests {
     fn unknown_status_returns_invalid_data() {
         let buffer = [99, 0, 0, 0, 0];
 
-        let err = read_response_sync(&mut Cursor::new(buffer), DEFAULT_MAX_PAYLOAD_LEN)
+        let err = read_response_sync(&mut Cursor::new(buffer), MAX_PAYLOAD_LEN)
             .expect_err("unknown status must fail");
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -282,7 +261,7 @@ mod tests {
     fn incomplete_header_returns_unexpected_eof() {
         let buffer = [1, 0, 0];
 
-        let err = read_request_sync(&mut Cursor::new(buffer), DEFAULT_MAX_PAYLOAD_LEN)
+        let err = read_request_sync(&mut Cursor::new(buffer), MAX_PAYLOAD_LEN)
             .expect_err("incomplete header must fail");
 
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
@@ -292,7 +271,7 @@ mod tests {
     fn incomplete_payload_returns_unexpected_eof() {
         let buffer = [1, 0, 0, 0, 3, b'a'];
 
-        let err = read_request_sync(&mut Cursor::new(buffer), DEFAULT_MAX_PAYLOAD_LEN)
+        let err = read_request_sync(&mut Cursor::new(buffer), MAX_PAYLOAD_LEN)
             .expect_err("incomplete payload must fail");
 
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
@@ -305,8 +284,8 @@ mod tests {
         write_request_sync(&mut buffer, 2, b"two").unwrap();
         let mut cursor = Cursor::new(buffer);
 
-        let first = read_request_sync(&mut cursor, DEFAULT_MAX_PAYLOAD_LEN).unwrap();
-        let second = read_request_sync(&mut cursor, DEFAULT_MAX_PAYLOAD_LEN).unwrap();
+        let first = read_request_sync(&mut cursor, MAX_PAYLOAD_LEN).unwrap();
+        let second = read_request_sync(&mut cursor, MAX_PAYLOAD_LEN).unwrap();
 
         assert_eq!(first, (1, b"one".to_vec()));
         assert_eq!(second, (2, b"two".to_vec()));
@@ -320,7 +299,7 @@ mod tests {
         let mut payload = Vec::with_capacity(128);
         let capacity = payload.capacity();
 
-        read_request_into_sync(&mut cursor, DEFAULT_MAX_PAYLOAD_LEN, &mut payload).unwrap();
+        read_request_into_sync(&mut cursor, MAX_PAYLOAD_LEN, &mut payload).unwrap();
 
         assert_eq!(payload, b"abc");
         assert_eq!(payload.capacity(), capacity);
@@ -348,8 +327,7 @@ mod tests {
         let mut cursor = Cursor::new(buffer);
         let mut payload = Vec::new();
 
-        let status =
-            read_response_into_sync(&mut cursor, DEFAULT_MAX_PAYLOAD_LEN, &mut payload).unwrap();
+        let status = read_response_into_sync(&mut cursor, MAX_PAYLOAD_LEN, &mut payload).unwrap();
 
         assert_eq!(status, UmbralStatus::Ok);
         assert_eq!(payload, b"done");

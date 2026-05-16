@@ -3,8 +3,5 @@ mod protocol;
 mod server;
 
 pub use client::UmbralClient;
-pub use protocol::{
-    DEFAULT_MAX_PAYLOAD_LEN, MethodId, REQUEST_HEADER_LEN, RESPONSE_HEADER_LEN, UmbralConfig,
-    UmbralStatus,
-};
+pub use protocol::{MethodId, REQUEST_HEADER_LEN, RESPONSE_HEADER_LEN, UmbralStatus};
 pub use server::UmbralServer;
