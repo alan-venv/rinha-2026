@@ -3,27 +3,19 @@ services:
     image: ghcr.io/alan-venv/rinha-service-2026:test
     container_name: rinha-lb
     command: ["./lb"]
-    environment:
-      - LB_BIND=0.0.0.0:80
-      - UPSTREAMS=/sockets/service-1.sock,/sockets/service-2.sock
-      - UPSTREAM_CONNECTIONS_PER_WORKER=6
     ports:
       - 9999:80
     volumes:
       - sockets:/sockets:rw
     networks:
       - backend
-    ulimits:
-      nofile:
-        soft: 65535
-        hard: 65535
     depends_on:
       - rinha-service-1
       - rinha-service-2
     deploy:
       resources:
         limits:
-          cpus: "0.10"
+          cpus: "0.30"
           memory: "50MB"
 
   rinha-service-1:
@@ -35,14 +27,10 @@ services:
       - sockets:/sockets:rw
     networks:
       - backend
-    ulimits:
-      nofile:
-        soft: 65535
-        hard: 65535
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.35"
           memory: "150MB"
 
   rinha-service-2:
@@ -54,14 +42,10 @@ services:
       - sockets:/sockets:rw
     networks:
       - backend
-    ulimits:
-      nofile:
-        soft: 65535
-        hard: 65535
     deploy:
       resources:
         limits:
-          cpus: "0.45"
+          cpus: "0.35"
           memory: "150MB"
 
 volumes:

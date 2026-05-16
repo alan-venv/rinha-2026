@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -9,9 +8,9 @@ use mio::{Events, Interest, Poll, Token};
 use rinha::controller;
 use umbral_socket::stream::{RESPONSE_HEADER_LEN, UmbralStatus};
 
-const DEFAULT_BIND: &str = "0.0.0.0:80";
-const DEFAULT_UPSTREAMS: &str = "/sockets/service-1.sock,/sockets/service-2.sock";
-const DEFAULT_CONNECTIONS_PER_UPSTREAM: usize = 4;
+const BIND: &str = "0.0.0.0:80";
+const UPSTREAM_SOCKETS: [&str; 2] = ["/sockets/service-1.sock", "/sockets/service-2.sock"];
+const CONNECTIONS_PER_UPSTREAM: usize = 6;
 const READ_BUFFER: usize = 16 * 1024;
 const MAX_HEADER_LEN: usize = 8 * 1024;
 const MAX_BODY_LEN: usize = 64 * 1024;
@@ -21,15 +20,20 @@ const UPSTREAM_START: usize = 1;
 
 const READY_RESPONSE: &[u8] =
     b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: keep-alive\r\n\r\nI was born ready";
-const BAD_REQUEST: &[u8] =
-    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-const NOT_FOUND: &[u8] =
-    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
-const SERVICE_UNAVAILABLE: &[u8] =
-    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-const RESPONSE_PREFIX: &[u8] =
-    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ";
-const RESPONSE_SUFFIX: &[u8] = b"\r\nConnection: keep-alive\r\n\r\n";
+const ERROR_RESPONSE: &[u8] =
+    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const BODY_SCORE_0: &[u8] = br#"{"approved":true,"fraud_score":0.0}"#;
+const BODY_SCORE_02: &[u8] = br#"{"approved":true,"fraud_score":0.2}"#;
+const BODY_SCORE_04: &[u8] = br#"{"approved":true,"fraud_score":0.4}"#;
+const BODY_SCORE_06: &[u8] = br#"{"approved":false,"fraud_score":0.6}"#;
+const BODY_SCORE_08: &[u8] = br#"{"approved":false,"fraud_score":0.8}"#;
+const BODY_SCORE_1: &[u8] = br#"{"approved":false,"fraud_score":1.0}"#;
+const RESPONSE_SCORE_0: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
+const RESPONSE_SCORE_02: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
+const RESPONSE_SCORE_04: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
+const RESPONSE_SCORE_06: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
+const RESPONSE_SCORE_08: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
+const RESPONSE_SCORE_1: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
 
 type Connections = Vec<Option<Connection>>;
 
@@ -44,7 +48,7 @@ struct Connection {
 
 struct UpstreamLane {
     stream: UnixStream,
-    socket: String,
+    socket: &'static str,
     token: Token,
     state: LaneState,
     client: Option<Token>,
@@ -79,15 +83,8 @@ enum ParsedRequest {
     Incomplete,
 }
 
-struct RequestHead {
-    is_ready: bool,
-    is_fraud_score: bool,
-    content_length: usize,
-}
-
 fn main() -> io::Result<()> {
-    let bind = std::env::var("LB_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
-    let address = bind
+    let address = BIND
         .parse::<SocketAddr>()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
 
@@ -96,18 +93,14 @@ fn main() -> io::Result<()> {
     poll.registry()
         .register(&mut listener, SERVER, Interest::READABLE)?;
 
-    let mut lanes = connect_lanes(
-        poll.registry(),
-        upstream_sockets(),
-        connections_per_upstream(),
-    )?;
+    let mut lanes = connect_lanes(poll.registry(), UPSTREAM_SOCKETS, CONNECTIONS_PER_UPSTREAM)?;
     let mut idle_lanes = (0..lanes.len()).rev().collect::<Vec<_>>();
     let client_start = UPSTREAM_START + lanes.len();
-    let mut pending_jobs = VecDeque::new();
+    let mut pending_jobs = Vec::new();
     let mut events = Events::with_capacity(1024);
     let mut connections = Vec::new();
     let mut next_token = client_start;
-    println!("LB: {bind}");
+    println!("LB: {BIND}");
 
     loop {
         poll.poll(&mut events, None)?;
@@ -154,19 +147,19 @@ fn main() -> io::Result<()> {
 
 fn connect_lanes(
     registry: &mio::Registry,
-    sockets: Vec<String>,
-    connections_per_upstream: usize,
+    sockets: [&'static str; 2],
+    lane_count_per_upstream: usize,
 ) -> io::Result<Vec<UpstreamLane>> {
-    let mut lanes = Vec::with_capacity(sockets.len() * connections_per_upstream);
+    let mut lanes = Vec::with_capacity(sockets.len() * lane_count_per_upstream);
 
     for socket in sockets {
-        for _ in 0..connections_per_upstream {
+        for _ in 0..lane_count_per_upstream {
             let token = Token(UPSTREAM_START + lanes.len());
             let mut stream = connect_upstream(&socket)?;
             registry.register(&mut stream, token, Interest::READABLE)?;
             lanes.push(UpstreamLane {
                 stream,
-                socket: socket.clone(),
+                socket,
                 token,
                 state: LaneState::Idle,
                 client: None,
@@ -224,7 +217,7 @@ fn read_connection(
     connections: &mut Connections,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut VecDeque<Job>,
+    pending_jobs: &mut Vec<Job>,
 ) -> io::Result<()> {
     let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
@@ -259,7 +252,7 @@ fn process_requests(
     connections: &mut Connections,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut VecDeque<Job>,
+    pending_jobs: &mut Vec<Job>,
 ) -> io::Result<()> {
     loop {
         let parsed = {
@@ -276,11 +269,8 @@ fn process_requests(
             ParsedRequest::Ready => {
                 queue_response(registry, token, connections, READY_RESPONSE, false)?
             }
-            ParsedRequest::NotFound => {
-                queue_response(registry, token, connections, NOT_FOUND, false)?
-            }
-            ParsedRequest::BadRequest => {
-                queue_response(registry, token, connections, BAD_REQUEST, true)?
+            ParsedRequest::NotFound | ParsedRequest::BadRequest => {
+                queue_response(registry, token, connections, ERROR_RESPONSE, true)?
             }
             ParsedRequest::Incomplete => return update_interest(registry, token, connections),
             ParsedRequest::FraudScore(body) => {
@@ -307,11 +297,11 @@ fn assign_job(
     registry: &mio::Registry,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut VecDeque<Job>,
+    pending_jobs: &mut Vec<Job>,
     job: Job,
 ) -> io::Result<()> {
     let Some(index) = idle_lanes.pop() else {
-        pending_jobs.push_back(job);
+        pending_jobs.push(job);
         return Ok(());
     };
 
@@ -341,7 +331,7 @@ fn handle_lane_event(
     index: usize,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut VecDeque<Job>,
+    pending_jobs: &mut Vec<Job>,
     connections: &mut Connections,
     readable: bool,
     writable: bool,
@@ -392,7 +382,7 @@ fn read_lane_response(
     index: usize,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut VecDeque<Job>,
+    pending_jobs: &mut Vec<Job>,
     connections: &mut Connections,
 ) -> io::Result<()> {
     let complete = {
@@ -480,7 +470,7 @@ fn complete_lane(
     index: usize,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut VecDeque<Job>,
+    pending_jobs: &mut Vec<Job>,
     connections: &mut Connections,
 ) -> io::Result<()> {
     let (client, status) = {
@@ -492,15 +482,14 @@ fn complete_lane(
 
     if let Some(client) = client {
         if status == UmbralStatus::Ok {
-            complete_client_json(
+            complete_client_payload(
                 registry,
                 client,
                 connections,
                 &lanes[index].response[..lanes[index].response_len],
-                false,
             )?;
         } else {
-            complete_client_bytes(registry, client, connections, SERVICE_UNAVAILABLE, true)?;
+            complete_client_bytes(registry, client, connections, ERROR_RESPONSE, true)?;
         }
     }
 
@@ -511,7 +500,7 @@ fn complete_lane(
         Interest::READABLE,
     )?;
 
-    if let Some(job) = pending_jobs.pop_front() {
+    if let Some(job) = pending_jobs.pop() {
         start_lane_job(registry, &mut lanes[index], job)?;
     } else {
         idle_lanes.push(index);
@@ -529,7 +518,7 @@ fn reconnect_lane(
 ) -> io::Result<()> {
     let client = lanes[index].client.take();
     if let Some(client) = client {
-        complete_client_bytes(registry, client, connections, SERVICE_UNAVAILABLE, true)?;
+        complete_client_bytes(registry, client, connections, ERROR_RESPONSE, true)?;
     }
 
     registry.deregister(&mut lanes[index].stream)?;
@@ -548,21 +537,20 @@ fn reconnect_lane(
     Ok(())
 }
 
-fn complete_client_json(
+fn complete_client_payload(
     registry: &mio::Registry,
     token: Token,
     connections: &mut Connections,
     payload: &[u8],
-    close: bool,
 ) -> io::Result<()> {
-    let Some(connection) = connection_mut(connections, token) else {
-        return Ok(());
-    };
-    connection.pending = false;
-    write_json_response_bytes(payload, &mut connection.write_buffer);
-    connection.write_offset = 0;
-    connection.closing = close;
-    flush_connection(registry, token, connections)
+    let response = http_response_for_payload(payload).unwrap_or(ERROR_RESPONSE);
+    complete_client_bytes(
+        registry,
+        token,
+        connections,
+        response,
+        response == ERROR_RESPONSE,
+    )
 }
 
 fn complete_client_bytes(
@@ -677,6 +665,24 @@ fn take_connection(connections: &mut Connections, token: Token) -> Option<Connec
     connections.get_mut(token.0)?.take()
 }
 
+fn http_response_for_payload(payload: &[u8]) -> Option<&'static [u8]> {
+    if payload == BODY_SCORE_0 {
+        Some(RESPONSE_SCORE_0)
+    } else if payload == BODY_SCORE_02 {
+        Some(RESPONSE_SCORE_02)
+    } else if payload == BODY_SCORE_04 {
+        Some(RESPONSE_SCORE_04)
+    } else if payload == BODY_SCORE_06 {
+        Some(RESPONSE_SCORE_06)
+    } else if payload == BODY_SCORE_08 {
+        Some(RESPONSE_SCORE_08)
+    } else if payload == BODY_SCORE_1 {
+        Some(RESPONSE_SCORE_1)
+    } else {
+        None
+    }
+}
+
 fn parse_request(buffer: &mut Vec<u8>) -> io::Result<ParsedRequest> {
     let Some(header_end) = find_header_end(buffer) else {
         if buffer.len() >= MAX_HEADER_LEN {
@@ -687,58 +693,33 @@ fn parse_request(buffer: &mut Vec<u8>) -> io::Result<ParsedRequest> {
     };
 
     let header = &buffer[..header_end];
-    let request = parse_request_head(header)?;
-    let total_len = header_end + 4 + request.content_length;
+    let body_start = header_end + 4;
 
-    if request.content_length > MAX_BODY_LEN {
-        buffer.clear();
-        return Ok(ParsedRequest::BadRequest);
-    }
-
-    if buffer.len() < total_len {
-        return Ok(ParsedRequest::Incomplete);
-    }
-
-    if request.is_ready {
-        drain_request(buffer, total_len);
+    if header.starts_with(b"GET /ready ") {
+        drain_request(buffer, body_start);
         Ok(ParsedRequest::Ready)
-    } else if request.is_fraud_score {
+    } else if header.starts_with(b"POST /fraud-score ") {
+        let Some(content_length) = find_content_length(header)? else {
+            buffer.clear();
+            return Ok(ParsedRequest::BadRequest);
+        };
+        if content_length > MAX_BODY_LEN {
+            buffer.clear();
+            return Ok(ParsedRequest::BadRequest);
+        }
+
+        let total_len = body_start + content_length;
+        if buffer.len() < total_len {
+            return Ok(ParsedRequest::Incomplete);
+        }
+
         let body = buffer[header_end + 4..total_len].to_vec();
         drain_request(buffer, total_len);
         Ok(ParsedRequest::FraudScore(body))
     } else {
-        drain_request(buffer, total_len);
+        drain_request(buffer, body_start);
         Ok(ParsedRequest::NotFound)
     }
-}
-
-fn parse_request_head(header: &[u8]) -> io::Result<RequestHead> {
-    let line_end = header
-        .windows(2)
-        .position(|window| window == b"\r\n")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid request line"))?;
-    let request_line = &header[..line_end];
-    let is_ready = request_line.starts_with(b"GET /ready ");
-    let is_fraud_score = request_line.starts_with(b"POST /fraud-score ");
-
-    let mut content_length = 0;
-    for line in header[line_end + 2..].split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if let Some(value) = header_value(line, b"Content-Length:") {
-            content_length = parse_usize(value)?;
-            break;
-        }
-        if let Some(value) = header_value(line, b"content-length:") {
-            content_length = parse_usize(value)?;
-            break;
-        }
-    }
-
-    Ok(RequestHead {
-        is_ready,
-        is_fraud_score,
-        content_length,
-    })
 }
 
 fn connect_upstream(socket: &str) -> io::Result<UnixStream> {
@@ -753,17 +734,19 @@ fn connect_upstream(socket: &str) -> io::Result<UnixStream> {
     }
 }
 
-fn header_value<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    line.get(..name.len())
-        .filter(|candidate| *candidate == name)
-        .map(|_| trim_spaces(&line[name.len()..]))
-}
-
-fn trim_spaces(mut value: &[u8]) -> &[u8] {
+fn find_content_length(header: &[u8]) -> io::Result<Option<usize>> {
+    let Some(index) = find_bytes(header, b"\r\nContent-Length:") else {
+        return Ok(None);
+    };
+    let mut value = &header[index + 17..];
     while matches!(value.first(), Some(b' ' | b'\t')) {
         value = &value[1..];
     }
-    value
+    let line_end = value
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .unwrap_or(value.len());
+    parse_usize(&value[..line_end]).map(Some)
 }
 
 fn parse_usize(value: &[u8]) -> io::Result<usize> {
@@ -784,7 +767,13 @@ fn parse_usize(value: &[u8]) -> io::Result<usize> {
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+    find_bytes(buffer, b"\r\n\r\n")
+}
+
+fn find_bytes(buffer: &[u8], needle: &[u8]) -> Option<usize> {
+    buffer
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn drain_request(buffer: &mut Vec<u8>, end: usize) {
@@ -793,51 +782,4 @@ fn drain_request(buffer: &mut Vec<u8>, end: usize) {
     } else {
         buffer.drain(..end);
     }
-}
-
-fn write_json_response_bytes(body: &[u8], output: &mut Vec<u8>) {
-    output.clear();
-    output.extend_from_slice(RESPONSE_PREFIX);
-    push_usize(body.len(), output);
-    output.extend_from_slice(RESPONSE_SUFFIX);
-    output.extend_from_slice(body);
-}
-
-fn push_usize(mut value: usize, output: &mut Vec<u8>) {
-    let mut digits = [0u8; 20];
-    let mut index = digits.len();
-
-    loop {
-        index -= 1;
-        digits[index] = b'0' + (value % 10) as u8;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-
-    output.extend_from_slice(&digits[index..]);
-}
-
-fn upstream_sockets() -> Vec<String> {
-    let sockets: Vec<String> = std::env::var("UPSTREAMS")
-        .unwrap_or_else(|_| DEFAULT_UPSTREAMS.to_string())
-        .split(',')
-        .filter(|socket| !socket.is_empty())
-        .map(str::to_string)
-        .collect();
-
-    if sockets.is_empty() {
-        DEFAULT_UPSTREAMS.split(',').map(str::to_string).collect()
-    } else {
-        sockets
-    }
-}
-
-fn connections_per_upstream() -> usize {
-    std::env::var("UPSTREAM_CONNECTIONS_PER_WORKER")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_CONNECTIONS_PER_UPSTREAM)
 }
