@@ -180,7 +180,9 @@ dependencies = [
 
 [[package]]
 name = "umbral-socket"
-version = "0.2.9"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e0a2344be7d19705a4d2561c6196ebc6c61977b09c6ecd6d245e1147c84e37a"
 dependencies = [
  "mio",
 ]

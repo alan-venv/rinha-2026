@@ -10,7 +10,7 @@ mimalloc = "0.1.50"
 mio = { version = "1.2.0", features = ["net", "os-poll"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["raw_value"] }
-umbral-socket = { path = "crates/umbral-socket" }
+umbral-socket = "0.3.0"
 
 [profile.release]
 lto = true
