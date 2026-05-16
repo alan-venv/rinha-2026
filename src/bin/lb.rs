@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -15,7 +15,7 @@ const DEFAULT_CONNECTIONS_PER_UPSTREAM: usize = 4;
 const READ_BUFFER: usize = 16 * 1024;
 const MAX_HEADER_LEN: usize = 8 * 1024;
 const MAX_BODY_LEN: usize = 64 * 1024;
-const MAX_UMBRAL_PAYLOAD_LEN: usize = 64 * 1024;
+const MAX_RESPONSE_BODY_LEN: usize = 64;
 const SERVER: Token = Token(0);
 const UPSTREAM_START: usize = 1;
 
@@ -30,6 +30,8 @@ const SERVICE_UNAVAILABLE: &[u8] =
 const RESPONSE_PREFIX: &[u8] =
     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ";
 const RESPONSE_SUFFIX: &[u8] = b"\r\nConnection: keep-alive\r\n\r\n";
+
+type Connections = Vec<Option<Connection>>;
 
 struct Connection {
     stream: TcpStream,
@@ -50,7 +52,7 @@ struct UpstreamLane {
     write_offset: usize,
     header: [u8; RESPONSE_HEADER_LEN],
     header_offset: usize,
-    response: Vec<u8>,
+    response: [u8; MAX_RESPONSE_BODY_LEN],
     response_offset: usize,
     response_len: usize,
     status: UmbralStatus,
@@ -109,7 +111,7 @@ fn main() -> io::Result<()> {
     let client_start = UPSTREAM_START + lanes.len();
     let mut pending_jobs = VecDeque::new();
     let mut events = Events::with_capacity(1024);
-    let mut connections = HashMap::new();
+    let mut connections = Vec::new();
     let mut next_token = client_start;
     println!("LB: {bind}");
 
@@ -178,7 +180,7 @@ fn connect_lanes(
                 write_offset: 0,
                 header: [0; RESPONSE_HEADER_LEN],
                 header_offset: 0,
-                response: Vec::with_capacity(128),
+                response: [0; MAX_RESPONSE_BODY_LEN],
                 response_offset: 0,
                 response_len: 0,
                 status: UmbralStatus::Ok,
@@ -192,7 +194,7 @@ fn connect_lanes(
 fn accept_connections(
     registry: &mio::Registry,
     listener: &mut TcpListener,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
     next_token: &mut usize,
 ) -> io::Result<()> {
     loop {
@@ -207,7 +209,8 @@ fn accept_connections(
         let token = Token(*next_token);
         *next_token += 1;
         registry.register(&mut stream, token, Interest::READABLE)?;
-        connections.insert(
+        insert_connection(
+            connections,
             token,
             Connection {
                 stream,
@@ -224,12 +227,12 @@ fn accept_connections(
 fn read_connection(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
     pending_jobs: &mut VecDeque<Job>,
 ) -> io::Result<()> {
-    let Some(connection) = connections.get_mut(&token) else {
+    let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
     };
 
@@ -259,14 +262,14 @@ fn read_connection(
 fn process_requests(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
     pending_jobs: &mut VecDeque<Job>,
 ) -> io::Result<()> {
     loop {
         let parsed = {
-            let Some(connection) = connections.get_mut(&token) else {
+            let Some(connection) = connection_mut(connections, token) else {
                 return Ok(());
             };
             if connection.pending || !connection.write_buffer.is_empty() {
@@ -291,7 +294,7 @@ fn process_requests(
                 body_len,
                 total_len,
             } => {
-                if let Some(connection) = connections.get_mut(&token) {
+                if let Some(connection) = connection_mut(connections, token) {
                     connection.pending = true;
                 }
                 assign_job(
@@ -318,7 +321,7 @@ fn assign_job(
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
     pending_jobs: &mut VecDeque<Job>,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
     job: Job,
 ) -> io::Result<()> {
     let Some(index) = idle_lanes.pop() else {
@@ -336,10 +339,10 @@ fn assign_job(
 fn start_lane_job(
     registry: &mio::Registry,
     lane: &mut UpstreamLane,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
     job: Job,
 ) -> io::Result<bool> {
-    let Some(connection) = connections.get_mut(&job.client) else {
+    let Some(connection) = connection_mut(connections, job.client) else {
         return Ok(false);
     };
     let body_end = job.body_start + job.body_len;
@@ -358,7 +361,6 @@ fn start_lane_job(
     lane.write_offset = 0;
     lane.header = [0; RESPONSE_HEADER_LEN];
     lane.header_offset = 0;
-    lane.response.clear();
     lane.response_offset = 0;
     lane.response_len = 0;
     lane.status = UmbralStatus::Ok;
@@ -374,7 +376,7 @@ fn handle_lane_event(
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
     pending_jobs: &mut VecDeque<Job>,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
     readable: bool,
     writable: bool,
 ) -> io::Result<()> {
@@ -425,7 +427,7 @@ fn read_lane_response(
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
     pending_jobs: &mut VecDeque<Job>,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
 ) -> io::Result<()> {
     let complete = {
         let lane = &mut lanes[index];
@@ -446,7 +448,7 @@ fn read_lane_response(
                                     lane.header[3],
                                     lane.header[4],
                                 ]) as usize;
-                                if lane.response_len > MAX_UMBRAL_PAYLOAD_LEN {
+                                if lane.response_len > MAX_RESPONSE_BODY_LEN {
                                     return reconnect_lane(
                                         registry,
                                         index,
@@ -455,8 +457,6 @@ fn read_lane_response(
                                         connections,
                                     );
                                 }
-                                lane.response.clear();
-                                lane.response.resize(lane.response_len, 0);
                                 lane.response_offset = 0;
                                 lane.state = LaneState::ReadingBody;
                                 if lane.response_len == 0 {
@@ -471,7 +471,10 @@ fn read_lane_response(
                     }
                 }
                 LaneState::ReadingBody => {
-                    match lane.stream.read(&mut lane.response[lane.response_offset..]) {
+                    match lane
+                        .stream
+                        .read(&mut lane.response[lane.response_offset..lane.response_len])
+                    {
                         Ok(0) => {
                             return reconnect_lane(registry, index, lanes, idle_lanes, connections);
                         }
@@ -512,7 +515,7 @@ fn complete_lane(
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
     pending_jobs: &mut VecDeque<Job>,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
 ) -> io::Result<()> {
     let (client, status) = {
         let lane = &mut lanes[index];
@@ -523,13 +526,18 @@ fn complete_lane(
 
     if let Some(client) = client {
         if status == UmbralStatus::Ok {
-            complete_client_json(registry, client, connections, &lanes[index].response, false)?;
+            complete_client_json(
+                registry,
+                client,
+                connections,
+                &lanes[index].response[..lanes[index].response_len],
+                false,
+            )?;
         } else {
             complete_client_bytes(registry, client, connections, SERVICE_UNAVAILABLE, true)?;
         }
     }
 
-    lanes[index].response.clear();
     lanes[index].state = LaneState::Idle;
     registry.reregister(
         &mut lanes[index].stream,
@@ -552,7 +560,7 @@ fn reconnect_lane(
     index: usize,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
 ) -> io::Result<()> {
     let client = lanes[index].client.take();
     if let Some(client) = client {
@@ -564,7 +572,8 @@ fn reconnect_lane(
     lanes[index].state = LaneState::Idle;
     lanes[index].write_buffer.clear();
     lanes[index].write_offset = 0;
-    lanes[index].response.clear();
+    lanes[index].response_len = 0;
+    lanes[index].response_offset = 0;
     registry.register(
         &mut lanes[index].stream,
         lanes[index].token,
@@ -577,11 +586,11 @@ fn reconnect_lane(
 fn complete_client_json(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
     payload: &[u8],
     close: bool,
 ) -> io::Result<()> {
-    let Some(connection) = connections.get_mut(&token) else {
+    let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
     };
     connection.pending = false;
@@ -594,11 +603,11 @@ fn complete_client_json(
 fn complete_client_bytes(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
     response: &[u8],
     close: bool,
 ) -> io::Result<()> {
-    let Some(connection) = connections.get_mut(&token) else {
+    let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
     };
     connection.pending = false;
@@ -612,11 +621,11 @@ fn complete_client_bytes(
 fn queue_response(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
     response: &[u8],
     close: bool,
 ) -> io::Result<()> {
-    let Some(connection) = connections.get_mut(&token) else {
+    let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
     };
     connection.write_buffer.clear();
@@ -629,9 +638,9 @@ fn queue_response(
 fn flush_connection(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
 ) -> io::Result<()> {
-    let Some(connection) = connections.get_mut(&token) else {
+    let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
     };
 
@@ -664,9 +673,9 @@ fn flush_connection(
 fn update_interest(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
 ) -> io::Result<()> {
-    let Some(connection) = connections.get_mut(&token) else {
+    let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
     };
     let interest = if connection.write_buffer.is_empty() {
@@ -680,12 +689,27 @@ fn update_interest(
 fn remove_connection(
     registry: &mio::Registry,
     token: Token,
-    connections: &mut HashMap<Token, Connection>,
+    connections: &mut Connections,
 ) -> io::Result<()> {
-    if let Some(mut connection) = connections.remove(&token) {
+    if let Some(mut connection) = take_connection(connections, token) {
         registry.deregister(&mut connection.stream)?;
     }
     Ok(())
+}
+
+fn insert_connection(connections: &mut Connections, token: Token, connection: Connection) {
+    if connections.len() <= token.0 {
+        connections.resize_with(token.0 + 1, || None);
+    }
+    connections[token.0] = Some(connection);
+}
+
+fn connection_mut(connections: &mut Connections, token: Token) -> Option<&mut Connection> {
+    connections.get_mut(token.0)?.as_mut()
+}
+
+fn take_connection(connections: &mut Connections, token: Token) -> Option<Connection> {
+    connections.get_mut(token.0)?.take()
 }
 
 fn parse_request(buffer: &mut Vec<u8>) -> io::Result<ParsedRequest> {
