@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -12,8 +13,8 @@ const BIND: &str = "0.0.0.0:80";
 const UPSTREAM_SOCKETS: [&str; 2] = ["/sockets/service-1.sock", "/sockets/service-2.sock"];
 const CONNECTIONS_PER_UPSTREAM: usize = 6;
 const READ_BUFFER: usize = 16 * 1024;
-const MAX_HEADER_LEN: usize = 8 * 1024;
-const MAX_BODY_LEN: usize = 64 * 1024;
+const MAX_HEADER_LEN: usize = 1024;
+const MAX_BODY_LEN: usize = 2048;
 const MAX_RESPONSE_BODY_LEN: usize = 64;
 const SERVER: Token = Token(0);
 const UPSTREAM_START: usize = 1;
@@ -96,7 +97,7 @@ fn main() -> io::Result<()> {
     let mut lanes = connect_lanes(poll.registry(), UPSTREAM_SOCKETS, CONNECTIONS_PER_UPSTREAM)?;
     let mut idle_lanes = (0..lanes.len()).rev().collect::<Vec<_>>();
     let client_start = UPSTREAM_START + lanes.len();
-    let mut pending_jobs = Vec::new();
+    let mut pending_jobs = VecDeque::new();
     let mut events = Events::with_capacity(1024);
     let mut connections = Vec::new();
     let mut next_token = client_start;
@@ -217,7 +218,7 @@ fn read_connection(
     connections: &mut Connections,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut Vec<Job>,
+    pending_jobs: &mut VecDeque<Job>,
 ) -> io::Result<()> {
     let Some(connection) = connection_mut(connections, token) else {
         return Ok(());
@@ -252,7 +253,7 @@ fn process_requests(
     connections: &mut Connections,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut Vec<Job>,
+    pending_jobs: &mut VecDeque<Job>,
 ) -> io::Result<()> {
     loop {
         let parsed = {
@@ -297,11 +298,11 @@ fn assign_job(
     registry: &mio::Registry,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut Vec<Job>,
+    pending_jobs: &mut VecDeque<Job>,
     job: Job,
 ) -> io::Result<()> {
     let Some(index) = idle_lanes.pop() else {
-        pending_jobs.push(job);
+        pending_jobs.push_back(job);
         return Ok(());
     };
 
@@ -331,7 +332,7 @@ fn handle_lane_event(
     index: usize,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut Vec<Job>,
+    pending_jobs: &mut VecDeque<Job>,
     connections: &mut Connections,
     readable: bool,
     writable: bool,
@@ -382,7 +383,7 @@ fn read_lane_response(
     index: usize,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut Vec<Job>,
+    pending_jobs: &mut VecDeque<Job>,
     connections: &mut Connections,
 ) -> io::Result<()> {
     let complete = {
@@ -470,7 +471,7 @@ fn complete_lane(
     index: usize,
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
-    pending_jobs: &mut Vec<Job>,
+    pending_jobs: &mut VecDeque<Job>,
     connections: &mut Connections,
 ) -> io::Result<()> {
     let (client, status) = {
@@ -500,7 +501,7 @@ fn complete_lane(
         Interest::READABLE,
     )?;
 
-    if let Some(job) = pending_jobs.pop() {
+    if let Some(job) = pending_jobs.pop_front() {
         start_lane_job(registry, &mut lanes[index], job)?;
     } else {
         idle_lanes.push(index);
