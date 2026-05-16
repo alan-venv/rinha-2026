@@ -5,13 +5,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use tokio::time::sleep;
-use umbral_socket::stream::{DEFAULT_MAX_PAYLOAD_LEN, UmbralClient, UmbralResponse, UmbralServer};
+use umbral_socket::stream::{DEFAULT_MAX_PAYLOAD_LEN, UmbralClient, UmbralServer};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-const DEFAULT_CONNECTIONS: usize = 4;
 const DEFAULT_CONCURRENCY: usize = 64;
 const DEFAULT_REQUESTS: usize = 100_000;
 const DEFAULT_PAYLOAD_BYTES: usize = 32;
@@ -22,7 +19,6 @@ const DEFAULT_SOCKET: &str = "/tmp/umbral-bench.sock";
 struct State;
 
 struct Config {
-    connections: usize,
     concurrency: usize,
     requests: usize,
     payload_bytes: usize,
@@ -33,7 +29,6 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            connections: DEFAULT_CONNECTIONS,
             concurrency: DEFAULT_CONCURRENCY,
             requests: DEFAULT_REQUESTS,
             payload_bytes: DEFAULT_PAYLOAD_BYTES,
@@ -43,49 +38,49 @@ impl Default for Config {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), BoxError> {
+fn main() -> Result<(), BoxError> {
     let config = parse_args()?;
     config.validate()?;
 
-    remove_socket_if_exists(&config.socket).await?;
+    remove_socket_if_exists(&config.socket)?;
 
     let server_socket = config.socket.clone();
     let _server_handle = thread::spawn(move || {
         let _ = UmbralServer::new(State)
-            .route(1, |_, _, _| Ok(UmbralResponse::RequestPayload))
+            .route(1, |_, _| Ok(b"ok"))
             .run(&server_socket);
     });
 
-    let result = run_benchmark(&config).await;
-    result
+    run_benchmark(&config)
 }
 
-async fn run_benchmark(config: &Config) -> Result<(), BoxError> {
-    wait_for_socket(&config.socket).await?;
+fn run_benchmark(config: &Config) -> Result<(), BoxError> {
+    wait_for_socket(&config.socket)?;
 
-    let client = Arc::new(UmbralClient::new(&config.socket, config.connections).await?);
-    let payload = Bytes::from(vec![b'x'; config.payload_bytes]);
-
+    let payload = vec![b'x'; config.payload_bytes];
+    let mut warmup_client = UmbralClient::new(&config.socket)?;
     for _ in 0..config.warmup {
-        client.send_with(1, payload.as_ref(), |_| Ok(())).await?;
+        warmup_client.send(1, &payload)?;
     }
 
     let benchmark_start = Instant::now();
     let mut handles = Vec::with_capacity(config.concurrency);
+    let socket = Arc::<str>::from(config.socket.as_str());
+    let payload = Arc::new(payload);
     let per_task = config.requests / config.concurrency;
     let remainder = config.requests % config.concurrency;
 
     for task_index in 0..config.concurrency {
-        let client = client.clone();
+        let socket = socket.clone();
         let payload = payload.clone();
         let task_requests = per_task + usize::from(task_index < remainder);
 
-        handles.push(tokio::spawn(async move {
+        handles.push(thread::spawn(move || {
+            let mut client = UmbralClient::new(socket.as_ref())?;
             let mut latencies = Vec::with_capacity(task_requests);
             for _ in 0..task_requests {
                 let start = Instant::now();
-                client.send_with(1, payload.as_ref(), |_| Ok(())).await?;
+                client.send(1, payload.as_ref())?;
                 latencies.push(start.elapsed());
             }
             Ok::<_, io::Error>(latencies)
@@ -94,7 +89,10 @@ async fn run_benchmark(config: &Config) -> Result<(), BoxError> {
 
     let mut latencies = Vec::with_capacity(config.requests);
     for handle in handles {
-        latencies.extend(handle.await??);
+        let task_latencies = handle
+            .join()
+            .map_err(|_| io::Error::other("benchmark thread panicked"))??;
+        latencies.extend(task_latencies);
     }
 
     let total_time = benchmark_start.elapsed();
@@ -120,7 +118,6 @@ async fn run_benchmark(config: &Config) -> Result<(), BoxError> {
 
     println!("umbral-bench");
     println!("socket: {}", config.socket);
-    println!("connections: {}", config.connections);
     println!("concurrency: {}", config.concurrency);
     println!("requests: {}", config.requests);
     println!("payload_bytes: {}", config.payload_bytes);
@@ -146,7 +143,6 @@ fn parse_args() -> io::Result<Config> {
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--connections" => config.connections = parse_usize_arg(&arg, args.next())?,
             "--concurrency" => config.concurrency = parse_usize_arg(&arg, args.next())?,
             "--requests" => config.requests = parse_usize_arg(&arg, args.next())?,
             "--payload-bytes" => config.payload_bytes = parse_usize_arg(&arg, args.next())?,
@@ -198,12 +194,6 @@ impl Config {
                 "concurrency must be greater than zero",
             ));
         }
-        if self.connections == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "connections must be greater than zero",
-            ));
-        }
         if self.payload_bytes > DEFAULT_MAX_PAYLOAD_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -214,21 +204,21 @@ impl Config {
     }
 }
 
-async fn remove_socket_if_exists(socket: &str) -> io::Result<()> {
-    match tokio::fs::remove_file(socket).await {
+fn remove_socket_if_exists(socket: &str) -> io::Result<()> {
+    match std::fs::remove_file(socket) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
 }
 
-async fn wait_for_socket(socket: &str) -> io::Result<()> {
+fn wait_for_socket(socket: &str) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(1);
     while Instant::now() < deadline {
         if Path::new(socket).exists() {
             return Ok(());
         }
-        sleep(Duration::from_millis(1)).await;
+        thread::sleep(Duration::from_millis(1));
     }
 
     Err(io::Error::new(

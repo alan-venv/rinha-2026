@@ -4,7 +4,6 @@ use crate::encoding;
 use crate::parser;
 use crate::response::fraud_response;
 use crate::service::Service;
-use umbral_socket::stream::UmbralResponse;
 
 pub const READY_RESPONSE: &[u8] = b"I was born ready";
 pub const FRAUD_SCORE_METHOD: u8 = 1;
@@ -23,14 +22,10 @@ pub fn score(service: &Service, body: &[u8]) -> io::Result<&'static [u8]> {
     Ok(fraud_response(score))
 }
 
-pub fn score_handler(
-    service: &Service,
-    payload: &[u8],
-    _: &mut Vec<u8>,
-) -> io::Result<UmbralResponse> {
-    Ok(UmbralResponse::Static(score(service, payload)?))
+pub fn score_handler(service: &Service, payload: &[u8]) -> io::Result<&'static [u8]> {
+    score(service, payload)
 }
 
-pub fn ready_handler(_: &Service, _: &[u8], _: &mut Vec<u8>) -> io::Result<UmbralResponse> {
-    Ok(UmbralResponse::Static(ready()))
+pub fn ready_handler(_: &Service, _: &[u8]) -> io::Result<&'static [u8]> {
+    Ok(ready())
 }

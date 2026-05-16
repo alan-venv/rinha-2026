@@ -13,14 +13,7 @@ use super::protocol::{MethodId, REQUEST_HEADER_LEN, UmbralConfig, UmbralStatus};
 const SERVER: Token = Token(0);
 const CONNECTION_START: usize = 1;
 
-pub enum UmbralResponse {
-    Empty,
-    RequestPayload,
-    ResponseBuffer,
-    Static(&'static [u8]),
-}
-
-type Handler<S> = fn(&S, &[u8], &mut Vec<u8>) -> io::Result<UmbralResponse>;
+type Handler<S> = fn(&S, &[u8]) -> io::Result<&'static [u8]>;
 
 pub struct UmbralServer<S> {
     state: S,
@@ -36,10 +29,9 @@ struct Connection {
     header_offset: usize,
     request: Vec<u8>,
     request_len: usize,
-    response: Vec<u8>,
     write_header: [u8; REQUEST_HEADER_LEN],
     write_header_offset: usize,
-    write_payload: WritePayload,
+    write_payload: &'static [u8],
     write_payload_offset: usize,
 }
 
@@ -48,14 +40,6 @@ enum ConnectionState {
     ReadingHeader,
     ReadingBody,
     Writing,
-}
-
-#[derive(Clone, Copy)]
-enum WritePayload {
-    Empty,
-    Request,
-    Response,
-    Static(&'static [u8]),
 }
 
 impl<S> UmbralServer<S> {
@@ -161,23 +145,14 @@ impl<S> UmbralServer<S> {
     }
 
     fn handle_request(&self, connection: &mut Connection, method: MethodId) {
-        connection.response.clear();
-
         let Some(handler) = self.handlers[method as usize] else {
             prepare_status(connection, UmbralStatus::MethodNotFound, false);
             return;
         };
 
-        match handler(&self.state, &connection.request, &mut connection.response) {
-            Ok(response) => {
-                let payload = match response {
-                    UmbralResponse::Empty => WritePayload::Empty,
-                    UmbralResponse::RequestPayload => WritePayload::Request,
-                    UmbralResponse::ResponseBuffer => WritePayload::Response,
-                    UmbralResponse::Static(bytes) => WritePayload::Static(bytes),
-                };
-
-                if payload_len(connection, payload) > self.config.max_payload_len {
+        match handler(&self.state, &connection.request) {
+            Ok(payload) => {
+                if payload.len() > self.config.max_payload_len {
                     prepare_status(connection, UmbralStatus::HandlerError, false);
                     return;
                 }
@@ -201,10 +176,9 @@ impl Connection {
             header_offset: 0,
             request: Vec::new(),
             request_len: 0,
-            response: Vec::new(),
             write_header: [0; REQUEST_HEADER_LEN],
             write_header_offset: 0,
-            write_payload: WritePayload::Empty,
+            write_payload: b"",
             write_payload_offset: 0,
         }
     }
@@ -217,7 +191,7 @@ impl Connection {
         self.request.clear();
         self.request_len = 0;
         self.write_header_offset = 0;
-        self.write_payload = WritePayload::Empty;
+        self.write_payload = b"";
         self.write_payload_offset = 0;
     }
 }
@@ -330,16 +304,16 @@ fn read_into_spare(
 }
 
 fn prepare_status(connection: &mut Connection, status: UmbralStatus, close: bool) {
-    prepare_response(connection, status, WritePayload::Empty, close);
+    prepare_response(connection, status, b"", close);
 }
 
 fn prepare_response(
     connection: &mut Connection,
     status: UmbralStatus,
-    payload: WritePayload,
+    payload: &'static [u8],
     close: bool,
 ) {
-    let len = payload_len(connection, payload) as u32;
+    let len = payload.len() as u32;
     connection.write_header[0] = status as u8;
     connection.write_header[1..].copy_from_slice(&len.to_be_bytes());
     connection.write_header_offset = 0;
@@ -359,7 +333,7 @@ fn flush_connection(
     };
 
     while connection.write_header_offset < connection.write_header.len()
-        || connection.write_payload_offset < payload_len(connection, connection.write_payload)
+        || connection.write_payload_offset < connection.write_payload.len()
     {
         let written = write_pending(connection)?;
         if written == 0 {
@@ -368,7 +342,7 @@ fn flush_connection(
     }
 
     if connection.write_header_offset == connection.write_header.len()
-        && connection.write_payload_offset == payload_len(connection, connection.write_payload)
+        && connection.write_payload_offset == connection.write_payload.len()
     {
         if connection.close_after_write {
             remove_connection(registry, token, connections)?;
@@ -388,7 +362,7 @@ fn write_pending(connection: &mut Connection) -> Result<usize> {
         return write_payload(connection);
     }
 
-    let payload_len = payload_len(connection, connection.write_payload);
+    let payload_len = connection.write_payload.len();
     if connection.write_payload_offset == payload_len {
         return match connection
             .stream
@@ -405,13 +379,7 @@ fn write_pending(connection: &mut Connection) -> Result<usize> {
 
     let written = {
         let header = &connection.write_header[connection.write_header_offset..];
-        let payload = match connection.write_payload {
-            WritePayload::Empty => b"".as_slice(),
-            WritePayload::Request => connection.request.as_slice(),
-            WritePayload::Response => connection.response.as_slice(),
-            WritePayload::Static(bytes) => bytes,
-        };
-        let payload = &payload[connection.write_payload_offset..];
+        let payload = &connection.write_payload[connection.write_payload_offset..];
         let stream = &mut connection.stream;
 
         match stream.write_vectored(&[IoSlice::new(header), IoSlice::new(payload)]) {
@@ -434,13 +402,7 @@ fn write_pending(connection: &mut Connection) -> Result<usize> {
 
 fn write_payload(connection: &mut Connection) -> Result<usize> {
     let written = {
-        let payload = match connection.write_payload {
-            WritePayload::Empty => b"".as_slice(),
-            WritePayload::Request => connection.request.as_slice(),
-            WritePayload::Response => connection.response.as_slice(),
-            WritePayload::Static(bytes) => bytes,
-        };
-        let payload = &payload[connection.write_payload_offset..];
+        let payload = &connection.write_payload[connection.write_payload_offset..];
         let stream = &mut connection.stream;
 
         match stream.write(payload) {
@@ -490,17 +452,4 @@ fn remove_connection(
         registry.deregister(&mut connection.stream)?;
     }
     Ok(())
-}
-
-fn payload_len(connection: &Connection, payload: WritePayload) -> usize {
-    payload_slice(connection, payload).len()
-}
-
-fn payload_slice(connection: &Connection, payload: WritePayload) -> &[u8] {
-    match payload {
-        WritePayload::Empty => b"",
-        WritePayload::Request => connection.request.as_slice(),
-        WritePayload::Response => connection.response.as_slice(),
-        WritePayload::Static(bytes) => bytes,
-    }
 }

@@ -66,12 +66,18 @@ enum LaneState {
 
 struct Job {
     client: Token,
-    body: Vec<u8>,
+    body_start: usize,
+    body_len: usize,
+    total_len: usize,
 }
 
 enum ParsedRequest {
     Ready,
-    FraudScore(Vec<u8>),
+    FraudScore {
+        body_start: usize,
+        body_len: usize,
+        total_len: usize,
+    },
     NotFound,
     BadRequest,
     Incomplete,
@@ -280,7 +286,11 @@ fn process_requests(
                 queue_response(registry, token, connections, BAD_REQUEST, true)?
             }
             ParsedRequest::Incomplete => return update_interest(registry, token, connections),
-            ParsedRequest::FraudScore(body) => {
+            ParsedRequest::FraudScore {
+                body_start,
+                body_len,
+                total_len,
+            } => {
                 if let Some(connection) = connections.get_mut(&token) {
                     connection.pending = true;
                 }
@@ -289,9 +299,12 @@ fn process_requests(
                     lanes,
                     idle_lanes,
                     pending_jobs,
+                    connections,
                     Job {
                         client: token,
-                        body,
+                        body_start,
+                        body_len,
+                        total_len,
                     },
                 )?;
                 return update_interest(registry, token, connections);
@@ -305,6 +318,7 @@ fn assign_job(
     lanes: &mut [UpstreamLane],
     idle_lanes: &mut Vec<usize>,
     pending_jobs: &mut VecDeque<Job>,
+    connections: &mut HashMap<Token, Connection>,
     job: Job,
 ) -> io::Result<()> {
     let Some(index) = idle_lanes.pop() else {
@@ -312,16 +326,35 @@ fn assign_job(
         return Ok(());
     };
 
-    start_lane_job(registry, &mut lanes[index], job)
+    if !start_lane_job(registry, &mut lanes[index], connections, job)? {
+        idle_lanes.push(index);
+    }
+
+    Ok(())
 }
 
-fn start_lane_job(registry: &mio::Registry, lane: &mut UpstreamLane, job: Job) -> io::Result<()> {
+fn start_lane_job(
+    registry: &mio::Registry,
+    lane: &mut UpstreamLane,
+    connections: &mut HashMap<Token, Connection>,
+    job: Job,
+) -> io::Result<bool> {
+    let Some(connection) = connections.get_mut(&job.client) else {
+        return Ok(false);
+    };
+    let body_end = job.body_start + job.body_len;
+    if connection.read_buffer.len() < job.total_len || body_end > job.total_len {
+        return Ok(false);
+    }
+
     lane.client = Some(job.client);
     lane.write_buffer.clear();
     lane.write_buffer.push(controller::FRAUD_SCORE_METHOD);
     lane.write_buffer
-        .extend_from_slice(&(job.body.len() as u32).to_be_bytes());
-    lane.write_buffer.extend_from_slice(&job.body);
+        .extend_from_slice(&(job.body_len as u32).to_be_bytes());
+    lane.write_buffer
+        .extend_from_slice(&connection.read_buffer[job.body_start..body_end]);
+    drain_request(&mut connection.read_buffer, job.total_len);
     lane.write_offset = 0;
     lane.header = [0; RESPONSE_HEADER_LEN];
     lane.header_offset = 0;
@@ -331,7 +364,8 @@ fn start_lane_job(registry: &mio::Registry, lane: &mut UpstreamLane, job: Job) -
     lane.status = UmbralStatus::Ok;
     lane.state = LaneState::Writing;
     registry.reregister(&mut lane.stream, lane.token, Interest::WRITABLE)?;
-    flush_lane_write(registry, lane)
+    flush_lane_write(registry, lane)?;
+    Ok(true)
 }
 
 fn handle_lane_event(
@@ -503,12 +537,13 @@ fn complete_lane(
         Interest::READABLE,
     )?;
 
-    if let Some(job) = pending_jobs.pop_front() {
-        start_lane_job(registry, &mut lanes[index], job)?;
-    } else {
-        idle_lanes.push(index);
+    while let Some(job) = pending_jobs.pop_front() {
+        if start_lane_job(registry, &mut lanes[index], connections, job)? {
+            return Ok(());
+        }
     }
 
+    idle_lanes.push(index);
     Ok(())
 }
 
@@ -679,9 +714,11 @@ fn parse_request(buffer: &mut Vec<u8>) -> io::Result<ParsedRequest> {
         drain_request(buffer, total_len);
         Ok(ParsedRequest::Ready)
     } else if request.is_fraud_score {
-        let body = buffer[header_end + 4..total_len].to_vec();
-        drain_request(buffer, total_len);
-        Ok(ParsedRequest::FraudScore(body))
+        Ok(ParsedRequest::FraudScore {
+            body_start: header_end + 4,
+            body_len: request.content_length,
+            total_len,
+        })
     } else {
         drain_request(buffer, total_len);
         Ok(ParsedRequest::NotFound)
