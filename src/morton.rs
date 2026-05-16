@@ -4,11 +4,20 @@ use std::path::Path;
 
 use memmap2::{Advice, Mmap};
 
+#[cfg(not(target_arch = "x86_64"))]
+compile_error!("morton AVX2 path requires x86_64");
+
+use std::arch::x86_64::{
+    __m256i, _mm_add_epi32, _mm_cvtsi128_si32, _mm256_abs_epi16, _mm256_castsi256_si128,
+    _mm256_extracti128_si256, _mm256_hadd_epi32, _mm256_loadu_si256, _mm256_madd_epi16,
+    _mm256_set1_epi16, _mm256_sub_epi16,
+};
+
 const MAGIC: &[u8; 8] = b"RMORTON1";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_LEN: usize = 20;
-const ENTRY_LEN: usize = 45;
-const DIMENSIONS: usize = 14;
+const ENTRY_LEN: usize = 49;
+const DIMENSIONS: usize = 16;
 const FAST_K: usize = 11;
 const FAST_D11_LIMIT: u32 = 5_000;
 
@@ -115,7 +124,7 @@ impl MortonIndex {
 
         for index in start..end {
             let entry = self.entry_at(index);
-            let distance = l1_distance(vector, &entry.vector);
+            let distance = unsafe { l1_distance_avx2(vector, &entry.vector) };
             if distance >= best[K - 1].0 {
                 continue;
             }
@@ -197,11 +206,22 @@ fn quantize_optional(value: i16) -> u8 {
     ((shifted * 255 + 10_000) / 20_000) as u8
 }
 
-fn l1_distance(left: &[i16; DIMENSIONS], right: &[i16; DIMENSIONS]) -> u32 {
-    left.iter()
-        .zip(right)
-        .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
-        .sum()
+#[inline(always)]
+unsafe fn l1_distance_avx2(left: &[i16; DIMENSIONS], right: &[i16; DIMENSIONS]) -> u32 {
+    let left = unsafe { _mm256_loadu_si256(left.as_ptr() as *const __m256i) };
+    let right = unsafe { _mm256_loadu_si256(right.as_ptr() as *const __m256i) };
+    let diff = unsafe { _mm256_abs_epi16(_mm256_sub_epi16(left, right)) };
+    let pairs = unsafe { _mm256_madd_epi16(diff, _mm256_set1_epi16(1)) };
+    unsafe { horizontal_sum_i32x8(pairs) as u32 }
+}
+
+#[inline(always)]
+unsafe fn horizontal_sum_i32x8(values: __m256i) -> i32 {
+    let sums = unsafe { _mm256_hadd_epi32(values, values) };
+    let sums = unsafe { _mm256_hadd_epi32(sums, sums) };
+    let low = unsafe { _mm256_castsi256_si128(sums) };
+    let high = unsafe { _mm256_extracti128_si256(sums, 1) };
+    unsafe { _mm_cvtsi128_si32(_mm_add_epi32(low, high)) }
 }
 
 fn decode_entry(raw: &[u8]) -> MortonEntry {
@@ -274,8 +294,8 @@ mod tests {
         let left = [0; DIMENSIONS];
         let mut right = [0; DIMENSIONS];
         right[0] = 10;
-        right[13] = -20;
+        right[15] = -20;
 
-        assert_eq!(l1_distance(&left, &right), 30);
+        assert_eq!(unsafe { l1_distance_avx2(&left, &right) }, 30);
     }
 }

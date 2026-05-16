@@ -6,12 +6,20 @@ use memmap2::{Advice, Mmap};
 
 use crate::morton::MortonEntry;
 
+#[cfg(not(target_arch = "x86_64"))]
+compile_error!("kd-tree AVX2 path requires x86_64");
+
+use std::arch::x86_64::{
+    __m256i, _mm_add_epi32, _mm_cvtsi128_si32, _mm256_castsi256_si128, _mm256_extracti128_si256,
+    _mm256_hadd_epi32, _mm256_loadu_si256, _mm256_madd_epi16, _mm256_sub_epi16,
+};
+
 const MAGIC: &[u8; 8] = b"RKDTREE1";
-const VERSION: u32 = 2;
+const VERSION: u32 = 4;
 const HEADER_LEN: usize = 28;
-const NODE_LEN: usize = 72;
-const RECORD_LEN: usize = 29;
-const DIMENSIONS: usize = 14;
+const NODE_LEN: usize = 80;
+const DIMENSIONS: usize = 16;
+const VECTOR_LEN: usize = DIMENSIONS * 2;
 const TOP_K: usize = 5;
 const LEAF_SIZE: usize = 64;
 const STACK_CAPACITY: usize = 128;
@@ -21,7 +29,8 @@ pub struct KdTree {
     mmap: Mmap,
     nodes: usize,
     records: usize,
-    records_offset: usize,
+    vectors_offset: usize,
+    labels_offset: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -80,12 +89,16 @@ impl KdTree {
         let nodes = u64::from_le_bytes(mmap[12..20].try_into().unwrap()) as usize;
         let records = u64::from_le_bytes(mmap[20..28].try_into().unwrap()) as usize;
         let nodes_len = nodes.checked_mul(NODE_LEN).ok_or_else(invalid_length)?;
-        let records_len = records.checked_mul(RECORD_LEN).ok_or_else(invalid_length)?;
-        let records_offset = HEADER_LEN
+        let vectors_len = records.checked_mul(VECTOR_LEN).ok_or_else(invalid_length)?;
+        let labels_len = records;
+        let vectors_offset = HEADER_LEN
             .checked_add(nodes_len)
             .ok_or_else(invalid_length)?;
-        let expected_len = records_offset
-            .checked_add(records_len)
+        let labels_offset = vectors_offset
+            .checked_add(vectors_len)
+            .ok_or_else(invalid_length)?;
+        let expected_len = labels_offset
+            .checked_add(labels_len)
             .ok_or_else(invalid_length)?;
 
         if mmap.len() != expected_len {
@@ -99,7 +112,8 @@ impl KdTree {
             mmap,
             nodes,
             records,
-            records_offset,
+            vectors_offset,
+            labels_offset,
         })
     }
 
@@ -135,13 +149,13 @@ impl KdTree {
                 let start = node.start as usize;
                 let end = start + node.len as usize;
                 for record_index in start..end {
-                    let record = self.record_at(record_index);
+                    let candidate = self.vector_at(record_index);
                     insert_neighbor(
                         &mut top,
                         Neighbor {
-                            distance: l2_distance(vector, &record.vector),
+                            distance: unsafe { l2_distance_avx2(vector, candidate) },
                             index: record_index as u32,
-                            label: record.label,
+                            label: self.label_at(record_index),
                         },
                     );
                 }
@@ -181,10 +195,15 @@ impl KdTree {
         decode_node(&self.mmap[start..start + NODE_LEN])
     }
 
-    fn record_at(&self, index: usize) -> KdRecord {
+    fn vector_at(&self, index: usize) -> &[u8] {
         debug_assert!(index < self.records);
-        let start = self.records_offset + (index * RECORD_LEN);
-        decode_record(&self.mmap[start..start + RECORD_LEN])
+        let start = self.vectors_offset + (index * VECTOR_LEN);
+        &self.mmap[start..start + VECTOR_LEN]
+    }
+
+    fn label_at(&self, index: usize) -> u8 {
+        debug_assert!(index < self.records);
+        self.mmap[self.labels_offset + index]
     }
 }
 
@@ -246,6 +265,9 @@ impl KdTreeBuilder {
             for value in record.vector {
                 output.write_all(&value.to_le_bytes())?;
             }
+        }
+
+        for record in &self.records {
             output.write_all(&[record.label])?;
         }
 
@@ -361,21 +383,6 @@ fn decode_node(raw: &[u8]) -> KdNode {
     }
 }
 
-fn decode_record(raw: &[u8]) -> KdRecord {
-    let mut vector = [0_i16; DIMENSIONS];
-    let mut offset = 0;
-
-    for value in &mut vector {
-        *value = i16::from_le_bytes(raw[offset..offset + 2].try_into().unwrap());
-        offset += 2;
-    }
-
-    KdRecord {
-        vector,
-        label: raw[offset],
-    }
-}
-
 fn lower_bound_l2(vector: &[i16; DIMENSIONS], node: &KdNode) -> u64 {
     let mut distance = 0_u64;
 
@@ -417,15 +424,24 @@ fn neighbor_better(left: Neighbor, right: Neighbor) -> bool {
     left.distance < right.distance || (left.distance == right.distance && left.index < right.index)
 }
 
-fn l2_distance(left: &[i16; DIMENSIONS], right: &[i16; DIMENSIONS]) -> u64 {
-    let mut distance = 0_u64;
+#[inline(always)]
+unsafe fn l2_distance_avx2(left: &[i16; DIMENSIONS], right: &[u8]) -> u64 {
+    debug_assert_eq!(right.len(), VECTOR_LEN);
 
-    for (left, right) in left.iter().zip(right) {
-        let difference = (*left as i32 - *right as i32).unsigned_abs() as u64;
-        distance += difference * difference;
-    }
+    let left = unsafe { _mm256_loadu_si256(left.as_ptr() as *const __m256i) };
+    let right = unsafe { _mm256_loadu_si256(right.as_ptr() as *const __m256i) };
+    let diff = unsafe { _mm256_sub_epi16(left, right) };
+    let squares = unsafe { _mm256_madd_epi16(diff, diff) };
+    unsafe { horizontal_sum_i32x8(squares) as u64 }
+}
 
-    distance
+#[inline(always)]
+unsafe fn horizontal_sum_i32x8(values: __m256i) -> i32 {
+    let sums = unsafe { _mm256_hadd_epi32(values, values) };
+    let sums = unsafe { _mm256_hadd_epi32(sums, sums) };
+    let low = unsafe { _mm256_castsi256_si128(sums) };
+    let high = unsafe { _mm256_extracti128_si256(sums, 1) };
+    unsafe { _mm_cvtsi128_si32(_mm_add_epi32(low, high)) }
 }
 
 fn invalid_length() -> io::Error {
