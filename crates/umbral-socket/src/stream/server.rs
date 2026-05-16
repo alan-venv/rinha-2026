@@ -74,8 +74,6 @@ impl<S> UmbralServer<S> {
         let mut connections = Vec::new();
         let mut next_token = CONNECTION_START;
 
-        println!("Umbral Server listening on \"{}\"", socket);
-
         loop {
             poll.poll(&mut events, None)?;
 
@@ -122,11 +120,12 @@ impl<S> UmbralServer<S> {
                     flush_connection(registry, token, connections)?;
                 }
                 Ok(None) => return update_interest(registry, token, connections),
-                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                    remove_connection(registry, token, connections)?;
-                    return Ok(());
-                }
-                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
                     remove_connection(registry, token, connections)?;
                     return Ok(());
                 }
@@ -245,7 +244,6 @@ fn read_request(connection: &mut Connection, max_payload_len: usize) -> Result<O
                 }
 
                 connection.request.clear();
-                connection.request.reserve(connection.request_len);
                 connection.state = ConnectionState::ReadingBody;
 
                 if connection.request_len == 0 {
