@@ -10,8 +10,7 @@ use umbral_socket::stream::UmbralServer;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let index = MortonIndex::load_default()?;
     let kdtree = KdTree::load_default()?;
     let service = Service::new(index, kdtree);
@@ -21,7 +20,6 @@ async fn main() -> Result<()> {
         .route(controller::FRAUD_SCORE_METHOD, controller::score_handler)
         .route(controller::READY_METHOD, controller::ready_handler)
         .run(&socket)
-        .await
 }
 
 fn socket() -> String {

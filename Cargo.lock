@@ -190,7 +190,6 @@ dependencies = [
  "mio",
  "serde",
  "serde_json",
- "tokio",
  "umbral-socket",
 ]
 
@@ -319,6 +318,7 @@ name = "umbral-socket"
 version = "0.2.9"
 dependencies = [
  "bytes",
+ "mio",
  "tokio",
 ]
 

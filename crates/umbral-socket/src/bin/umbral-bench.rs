@@ -2,6 +2,7 @@ use std::env;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -50,15 +51,13 @@ async fn main() -> Result<(), BoxError> {
     remove_socket_if_exists(&config.socket).await?;
 
     let server_socket = config.socket.clone();
-    let server_handle = tokio::spawn(async move {
+    let _server_handle = thread::spawn(move || {
         let _ = UmbralServer::new(State)
             .route(1, |_, _, _| Ok(UmbralResponse::RequestPayload))
-            .run(&server_socket)
-            .await;
+            .run(&server_socket);
     });
 
     let result = run_benchmark(&config).await;
-    server_handle.abort();
     result
 }
 
