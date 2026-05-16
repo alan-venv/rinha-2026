@@ -14,6 +14,7 @@ const RECORD_LEN: usize = 29;
 const DIMENSIONS: usize = 14;
 const TOP_K: usize = 5;
 const LEAF_SIZE: usize = 64;
+const STACK_CAPACITY: usize = 128;
 const NO_CHILD: u32 = u32::MAX;
 
 pub struct KdTree {
@@ -119,8 +120,12 @@ impl KdTree {
             return top;
         }
 
-        let mut stack = vec![0_usize];
-        while let Some(node_index) = stack.pop() {
+        let mut stack = [0_usize; STACK_CAPACITY];
+        let mut stack_len = 1;
+
+        while stack_len > 0 {
+            stack_len -= 1;
+            let node_index = stack[stack_len];
             let node = self.node_at(node_index);
             if lower_bound_l2(vector, &node) > top[TOP_K - 1].distance {
                 continue;
@@ -153,17 +158,17 @@ impl KdTree {
 
             if left_bound <= right_bound {
                 if right_bound <= worst {
-                    stack.push(right);
+                    push_stack(&mut stack, &mut stack_len, right);
                 }
                 if left_bound <= worst {
-                    stack.push(left);
+                    push_stack(&mut stack, &mut stack_len, left);
                 }
             } else {
                 if left_bound <= worst {
-                    stack.push(left);
+                    push_stack(&mut stack, &mut stack_len, left);
                 }
                 if right_bound <= worst {
-                    stack.push(right);
+                    push_stack(&mut stack, &mut stack_len, right);
                 }
             }
         }
@@ -387,6 +392,12 @@ fn lower_bound_l2(vector: &[i16; DIMENSIONS], node: &KdNode) -> u64 {
     }
 
     distance
+}
+
+fn push_stack(stack: &mut [usize; STACK_CAPACITY], len: &mut usize, value: usize) {
+    debug_assert!(*len < STACK_CAPACITY);
+    stack[*len] = value;
+    *len += 1;
 }
 
 fn insert_neighbor(top: &mut [Neighbor; TOP_K], neighbor: Neighbor) {
