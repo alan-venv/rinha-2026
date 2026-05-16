@@ -1,12 +1,12 @@
 services:
-  haproxy:
-    image: haproxy:3.2.3-alpine
-    container_name: rinha-haproxy
+  rinha-lb:
+    image: ghcr.io/alan-venv/rinha-service-2026:1778967414
+    container_name: rinha-lb
+    command: ["./lb"]
     ports:
       - 9999:80
     volumes:
       - sockets:/sockets:rw
-      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     networks:
       - backend
     depends_on:
@@ -19,10 +19,8 @@ services:
           memory: "50MB"
 
   rinha-service-1:
-    image: ghcr.io/alan-venv/rinha-service-2026:1778900375
+    image: ghcr.io/alan-venv/rinha-service-2026:1778967414
     container_name: rinha-service-1
-    security_opt:
-      - seccomp=unconfined
     environment:
       - SOCKET=/sockets/service-1.sock
     volumes:
@@ -36,10 +34,8 @@ services:
           memory: "150MB"
 
   rinha-service-2:
-    image: ghcr.io/alan-venv/rinha-service-2026:1778900375
+    image: ghcr.io/alan-venv/rinha-service-2026:1778967414
     container_name: rinha-service-2
-    security_opt:
-      - seccomp=unconfined
     environment:
       - SOCKET=/sockets/service-2.sock
     volumes:
