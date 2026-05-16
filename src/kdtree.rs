@@ -4,12 +4,13 @@ use std::path::Path;
 
 use memmap2::{Advice, Mmap};
 
-use crate::morton::{MortonEntry, MortonIndex};
+use crate::morton::MortonEntry;
 
 const MAGIC: &[u8; 8] = b"RKDTREE1";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_LEN: usize = 28;
 const NODE_LEN: usize = 72;
+const RECORD_LEN: usize = 29;
 const DIMENSIONS: usize = 14;
 const TOP_K: usize = 5;
 const LEAF_SIZE: usize = 64;
@@ -18,8 +19,8 @@ const NO_CHILD: u32 = u32::MAX;
 pub struct KdTree {
     mmap: Mmap,
     nodes: usize,
-    indices: usize,
-    indices_offset: usize,
+    records: usize,
+    records_offset: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -39,9 +40,16 @@ struct Neighbor {
     label: u8,
 }
 
+#[derive(Clone, Copy)]
+struct KdRecord {
+    vector: [i16; DIMENSIONS],
+    label: u8,
+}
+
 pub struct KdTreeBuilder {
     nodes: Vec<KdNode>,
     indices: Vec<u32>,
+    records: Vec<KdRecord>,
 }
 
 impl KdTree {
@@ -69,14 +77,14 @@ impl KdTree {
         }
 
         let nodes = u64::from_le_bytes(mmap[12..20].try_into().unwrap()) as usize;
-        let indices = u64::from_le_bytes(mmap[20..28].try_into().unwrap()) as usize;
+        let records = u64::from_le_bytes(mmap[20..28].try_into().unwrap()) as usize;
         let nodes_len = nodes.checked_mul(NODE_LEN).ok_or_else(invalid_length)?;
-        let indices_len = indices.checked_mul(4).ok_or_else(invalid_length)?;
-        let indices_offset = HEADER_LEN
+        let records_len = records.checked_mul(RECORD_LEN).ok_or_else(invalid_length)?;
+        let records_offset = HEADER_LEN
             .checked_add(nodes_len)
             .ok_or_else(invalid_length)?;
-        let expected_len = indices_offset
-            .checked_add(indices_len)
+        let expected_len = records_offset
+            .checked_add(records_len)
             .ok_or_else(invalid_length)?;
 
         if mmap.len() != expected_len {
@@ -89,18 +97,18 @@ impl KdTree {
         Ok(Self {
             mmap,
             nodes,
-            indices,
-            indices_offset,
+            records,
+            records_offset,
         })
     }
 
-    pub fn score(&self, index: &MortonIndex, vector: &[i16; DIMENSIONS]) -> f32 {
-        let top = self.top5(index, vector);
+    pub fn score(&self, vector: &[i16; DIMENSIONS]) -> f32 {
+        let top = self.top5(vector);
         let frauds = top.iter().filter(|neighbor| neighbor.label == 1).count();
         frauds as f32 / TOP_K as f32
     }
 
-    fn top5(&self, index: &MortonIndex, vector: &[i16; DIMENSIONS]) -> [Neighbor; TOP_K] {
+    fn top5(&self, vector: &[i16; DIMENSIONS]) -> [Neighbor; TOP_K] {
         let mut top = [Neighbor {
             distance: u64::MAX,
             index: u32::MAX,
@@ -121,15 +129,14 @@ impl KdTree {
             if node.left == NO_CHILD {
                 let start = node.start as usize;
                 let end = start + node.len as usize;
-                for index_offset in start..end {
-                    let entry_index = self.index_at(index_offset);
-                    let entry = index.entry_at(entry_index as usize);
+                for record_index in start..end {
+                    let record = self.record_at(record_index);
                     insert_neighbor(
                         &mut top,
                         Neighbor {
-                            distance: l2_distance(vector, &entry.vector),
-                            index: entry_index,
-                            label: entry.label,
+                            distance: l2_distance(vector, &record.vector),
+                            index: record_index as u32,
+                            label: record.label,
                         },
                     );
                 }
@@ -169,10 +176,10 @@ impl KdTree {
         decode_node(&self.mmap[start..start + NODE_LEN])
     }
 
-    fn index_at(&self, index: usize) -> u32 {
-        debug_assert!(index < self.indices);
-        let start = self.indices_offset + (index * 4);
-        u32::from_le_bytes(self.mmap[start..start + 4].try_into().unwrap())
+    fn record_at(&self, index: usize) -> KdRecord {
+        debug_assert!(index < self.records);
+        let start = self.records_offset + (index * RECORD_LEN);
+        decode_record(&self.mmap[start..start + RECORD_LEN])
     }
 }
 
@@ -188,12 +195,24 @@ impl KdTreeBuilder {
         let mut tree = Self {
             nodes: Vec::new(),
             indices: (0..entries.len() as u32).collect(),
+            records: Vec::new(),
         };
 
         let len = tree.indices.len();
         if len > 0 {
             tree.build_node(entries, 0, len)?;
         }
+        tree.records = tree
+            .indices
+            .iter()
+            .map(|&entry_index| {
+                let entry = entries[entry_index as usize];
+                KdRecord {
+                    vector: entry.vector,
+                    label: entry.label,
+                }
+            })
+            .collect();
 
         Ok(tree)
     }
@@ -203,7 +222,7 @@ impl KdTreeBuilder {
         output.write_all(MAGIC)?;
         output.write_all(&VERSION.to_le_bytes())?;
         output.write_all(&(self.nodes.len() as u64).to_le_bytes())?;
-        output.write_all(&(self.indices.len() as u64).to_le_bytes())?;
+        output.write_all(&(self.records.len() as u64).to_le_bytes())?;
 
         for node in &self.nodes {
             for value in node.min {
@@ -218,8 +237,11 @@ impl KdTreeBuilder {
             output.write_all(&node.len.to_le_bytes())?;
         }
 
-        for index in &self.indices {
-            output.write_all(&index.to_le_bytes())?;
+        for record in &self.records {
+            for value in record.vector {
+                output.write_all(&value.to_le_bytes())?;
+            }
+            output.write_all(&[record.label])?;
         }
 
         output.flush()
@@ -229,8 +251,8 @@ impl KdTreeBuilder {
         self.nodes.len()
     }
 
-    pub fn indices_len(&self) -> usize {
-        self.indices.len()
+    pub fn records_len(&self) -> usize {
+        self.records.len()
     }
 
     fn build_node(&mut self, entries: &[MortonEntry], start: usize, len: usize) -> io::Result<u32> {
@@ -331,6 +353,21 @@ fn decode_node(raw: &[u8]) -> KdNode {
         right,
         start,
         len,
+    }
+}
+
+fn decode_record(raw: &[u8]) -> KdRecord {
+    let mut vector = [0_i16; DIMENSIONS];
+    let mut offset = 0;
+
+    for value in &mut vector {
+        *value = i16::from_le_bytes(raw[offset..offset + 2].try_into().unwrap());
+        offset += 2;
+    }
+
+    KdRecord {
+        vector,
+        label: raw[offset],
     }
 }
 

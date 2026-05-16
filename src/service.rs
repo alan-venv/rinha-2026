@@ -23,7 +23,7 @@ impl Service {
         }
 
         FraudDecision {
-            fraud_score: self.kdtree.score(&self.morton, vector),
+            fraud_score: self.kdtree.score(vector),
             source: DecisionSource::KdTree,
         }
     }

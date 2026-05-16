@@ -25,9 +25,9 @@ fn main() -> Result<()> {
     let kdtree = KdTreeBuilder::build(&entries)?;
     kdtree.write("resources/kdtree.bin")?;
     println!(
-        "wrote {} kd-tree nodes and {} kd-tree indices",
+        "wrote {} kd-tree nodes and {} kd-tree records",
         kdtree.nodes_len(),
-        kdtree.indices_len()
+        kdtree.records_len()
     );
 
     Ok(())
