@@ -58,6 +58,12 @@ struct KdRecord {
     label: u8,
 }
 
+#[derive(Clone, Copy)]
+struct StackItem {
+    index: usize,
+    bound: u64,
+}
+
 pub struct KdTreeBuilder {
     nodes: Vec<KdNode>,
     indices: Vec<u32>,
@@ -136,17 +142,17 @@ impl KdTree {
             return top;
         }
 
-        let mut stack = [0_usize; STACK_CAPACITY];
+        let mut stack = [StackItem { index: 0, bound: 0 }; STACK_CAPACITY];
         let mut stack_len = 1;
 
         while stack_len > 0 {
             stack_len -= 1;
-            let node_index = stack[stack_len];
-            let node = self.node_at(node_index);
-            if lower_bound_l2(vector, &node) > top[TOP_K - 1].distance {
+            let item = stack[stack_len];
+            if item.bound > top[TOP_K - 1].distance {
                 continue;
             }
 
+            let node = self.node_at(item.index);
             if node.left == NO_CHILD {
                 let start = node.start as usize;
                 let end = start + node.len as usize;
@@ -180,17 +186,17 @@ impl KdTree {
 
             if left_bound <= right_bound {
                 if right_bound <= worst {
-                    push_stack(&mut stack, &mut stack_len, right);
+                    push_stack(&mut stack, &mut stack_len, right, right_bound);
                 }
                 if left_bound <= worst {
-                    push_stack(&mut stack, &mut stack_len, left);
+                    push_stack(&mut stack, &mut stack_len, left, left_bound);
                 }
             } else {
                 if left_bound <= worst {
-                    push_stack(&mut stack, &mut stack_len, left);
+                    push_stack(&mut stack, &mut stack_len, left, left_bound);
                 }
                 if right_bound <= worst {
-                    push_stack(&mut stack, &mut stack_len, right);
+                    push_stack(&mut stack, &mut stack_len, right, right_bound);
                 }
             }
         }
@@ -395,9 +401,9 @@ fn lower_bound_l2(vector: &[i16; DIMENSIONS], node: &KdNode) -> u64 {
     unsafe { lower_bound_l2_avx2(vector, node) }
 }
 
-fn push_stack(stack: &mut [usize; STACK_CAPACITY], len: &mut usize, value: usize) {
+fn push_stack(stack: &mut [StackItem; STACK_CAPACITY], len: &mut usize, index: usize, bound: u64) {
     debug_assert!(*len < STACK_CAPACITY);
-    stack[*len] = value;
+    stack[*len] = StackItem { index, bound };
     *len += 1;
 }
 
