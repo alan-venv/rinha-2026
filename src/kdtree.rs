@@ -10,8 +10,10 @@ use crate::morton::MortonEntry;
 compile_error!("kd-tree AVX2 path requires x86_64");
 
 use std::arch::x86_64::{
-    __m256i, _mm_add_epi32, _mm_cvtsi128_si32, _mm256_castsi256_si128, _mm256_extracti128_si256,
-    _mm256_hadd_epi32, _mm256_loadu_si256, _mm256_madd_epi16, _mm256_sub_epi16,
+    __m128i, __m256i, _mm_cvtsi128_si32, _mm_extract_epi32, _mm_loadu_si128, _mm_madd_epi16,
+    _mm_sub_epi16, _mm256_add_epi16, _mm256_castsi256_si128, _mm256_extracti128_si256,
+    _mm256_loadu_si256, _mm256_madd_epi16, _mm256_max_epi16, _mm256_setzero_si256,
+    _mm256_sub_epi16,
 };
 
 const MAGIC: &[u8; 8] = b"RKDTREE1";
@@ -150,10 +152,16 @@ impl KdTree {
                 let end = start + node.len as usize;
                 for record_index in start..end {
                     let candidate = self.vector_at(record_index);
+                    let Some(distance) = (unsafe {
+                        l2_distance_with_first_8_exit(vector, candidate, top[TOP_K - 1].distance)
+                    }) else {
+                        continue;
+                    };
+
                     insert_neighbor(
                         &mut top,
                         Neighbor {
-                            distance: unsafe { l2_distance_avx2(vector, candidate) },
+                            distance,
                             index: record_index as u32,
                             label: self.label_at(record_index),
                         },
@@ -384,21 +392,7 @@ fn decode_node(raw: &[u8]) -> KdNode {
 }
 
 fn lower_bound_l2(vector: &[i16; DIMENSIONS], node: &KdNode) -> u64 {
-    let mut distance = 0_u64;
-
-    for (dimension, value) in vector.iter().enumerate() {
-        let difference = if *value < node.min[dimension] {
-            node.min[dimension] as i32 - *value as i32
-        } else if *value > node.max[dimension] {
-            *value as i32 - node.max[dimension] as i32
-        } else {
-            0
-        } as u64;
-
-        distance += difference * difference;
-    }
-
-    distance
+    unsafe { lower_bound_l2_avx2(vector, node) }
 }
 
 fn push_stack(stack: &mut [usize; STACK_CAPACITY], len: &mut usize, value: usize) {
@@ -425,23 +419,60 @@ fn neighbor_better(left: Neighbor, right: Neighbor) -> bool {
 }
 
 #[inline(always)]
-unsafe fn l2_distance_avx2(left: &[i16; DIMENSIONS], right: &[u8]) -> u64 {
+unsafe fn l2_distance_with_first_8_exit(
+    left: &[i16; DIMENSIONS],
+    right: &[u8],
+    worst: u64,
+) -> Option<u64> {
     debug_assert_eq!(right.len(), VECTOR_LEN);
 
-    let left = unsafe { _mm256_loadu_si256(left.as_ptr() as *const __m256i) };
-    let right = unsafe { _mm256_loadu_si256(right.as_ptr() as *const __m256i) };
-    let diff = unsafe { _mm256_sub_epi16(left, right) };
-    let squares = unsafe { _mm256_madd_epi16(diff, diff) };
-    unsafe { horizontal_sum_i32x8(squares) as u64 }
+    let first = unsafe { l2_distance_8_i16(left.as_ptr(), right.as_ptr()) };
+    if first > worst {
+        return None;
+    }
+
+    let last = unsafe { l2_distance_8_i16(left.as_ptr().add(8), right.as_ptr().add(16)) };
+    Some(first + last)
 }
 
 #[inline(always)]
-unsafe fn horizontal_sum_i32x8(values: __m256i) -> i32 {
-    let sums = unsafe { _mm256_hadd_epi32(values, values) };
-    let sums = unsafe { _mm256_hadd_epi32(sums, sums) };
-    let low = unsafe { _mm256_castsi256_si128(sums) };
-    let high = unsafe { _mm256_extracti128_si256(sums, 1) };
-    unsafe { _mm_cvtsi128_si32(_mm_add_epi32(low, high)) }
+unsafe fn l2_distance_8_i16(left: *const i16, right: *const u8) -> u64 {
+    let left = unsafe { _mm_loadu_si128(left as *const __m128i) };
+    let right = unsafe { _mm_loadu_si128(right as *const __m128i) };
+    let diff = unsafe { _mm_sub_epi16(left, right) };
+    let squares = unsafe { _mm_madd_epi16(diff, diff) };
+    unsafe { horizontal_sum_i32x4(squares) }
+}
+
+#[inline(always)]
+unsafe fn lower_bound_l2_avx2(vector: &[i16; DIMENSIONS], node: &KdNode) -> u64 {
+    let value = unsafe { _mm256_loadu_si256(vector.as_ptr() as *const __m256i) };
+    let min = unsafe { _mm256_loadu_si256(node.min.as_ptr() as *const __m256i) };
+    let max = unsafe { _mm256_loadu_si256(node.max.as_ptr() as *const __m256i) };
+    let zero = unsafe { _mm256_setzero_si256() };
+
+    let below = unsafe { _mm256_max_epi16(_mm256_sub_epi16(min, value), zero) };
+    let above = unsafe { _mm256_max_epi16(_mm256_sub_epi16(value, max), zero) };
+    let diff = unsafe { _mm256_add_epi16(below, above) };
+    let squares = unsafe { _mm256_madd_epi16(diff, diff) };
+
+    unsafe { horizontal_sum_i32x8(squares) }
+}
+
+#[inline(always)]
+unsafe fn horizontal_sum_i32x8(values: __m256i) -> u64 {
+    let low = unsafe { _mm256_castsi256_si128(values) };
+    let high = unsafe { _mm256_extracti128_si256::<1>(values) };
+    unsafe { horizontal_sum_i32x4(low) + horizontal_sum_i32x4(high) }
+}
+
+#[inline(always)]
+unsafe fn horizontal_sum_i32x4(values: __m128i) -> u64 {
+    let lane0 = unsafe { _mm_cvtsi128_si32(values) } as u64;
+    let lane1 = unsafe { _mm_extract_epi32::<1>(values) } as u64;
+    let lane2 = unsafe { _mm_extract_epi32::<2>(values) } as u64;
+    let lane3 = unsafe { _mm_extract_epi32::<3>(values) } as u64;
+    lane0 + lane1 + lane2 + lane3
 }
 
 fn invalid_length() -> io::Error {
@@ -462,4 +493,54 @@ fn warmup(mmap: &Mmap) {
     }
 
     std::hint::black_box(checksum);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lower_bound_l2_matches_scalar_formula() {
+        let vector = [
+            -10_000, -8_000, -2_000, -1, 0, 1, 999, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000,
+            8_000, 9_000, 10_000,
+        ];
+        let node = KdNode {
+            min: [
+                -9_000, -7_000, -3_000, -2, -1, 0, 1_000, 2_000, 2_500, 4_100, 5_000, 6_001, 7_100,
+                7_000, 9_000, 9_500,
+            ],
+            max: [
+                -8_500, -6_500, -1_000, 0, 1, 2, 2_000, 3_000, 3_500, 4_200, 5_100, 6_100, 7_200,
+                7_500, 9_100, 9_700,
+            ],
+            left: NO_CHILD,
+            right: NO_CHILD,
+            start: 0,
+            len: 0,
+        };
+
+        assert_eq!(
+            lower_bound_l2(&vector, &node),
+            lower_bound_l2_scalar(&vector, &node)
+        );
+    }
+
+    fn lower_bound_l2_scalar(vector: &[i16; DIMENSIONS], node: &KdNode) -> u64 {
+        let mut distance = 0_u64;
+
+        for (dimension, value) in vector.iter().enumerate() {
+            let difference = if *value < node.min[dimension] {
+                node.min[dimension] as i32 - *value as i32
+            } else if *value > node.max[dimension] {
+                *value as i32 - node.max[dimension] as i32
+            } else {
+                0
+            } as u64;
+
+            distance += difference * difference;
+        }
+
+        distance
+    }
 }
