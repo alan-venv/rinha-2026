@@ -7,7 +7,7 @@ use actix_web::{App, HttpServer};
 use mimalloc::MiMalloc;
 use rinha::controller;
 use rinha::kdtree::KdTree;
-use rinha::morton::MortonIndex;
+use rinha::morton::Morton;
 use rinha::service::Service;
 
 #[global_allocator]
@@ -15,9 +15,9 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 #[actix_web::main]
 async fn main() -> Result<()> {
-    let index = MortonIndex::load_default()?;
+    let morton = Morton::load_default()?;
     let kdtree = KdTree::load_default()?;
-    let service = Data::new(Service::new(index, kdtree));
+    let service = Data::new(Service::new(morton, kdtree));
 
     let socket = socket();
     let server = HttpServer::new(move || {
