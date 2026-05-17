@@ -1,12 +1,12 @@
-use crate::{kdtree::KdTree, morton::MortonIndex};
+use crate::{kdtree::KdTree, morton::Morton};
 
 pub struct Service {
-    morton: MortonIndex,
+    morton: Morton,
     kdtree: KdTree,
 }
 
 impl Service {
-    pub fn new(morton: MortonIndex, kdtree: KdTree) -> Self {
+    pub fn new(morton: Morton, kdtree: KdTree) -> Self {
         Self { morton, kdtree }
     }
 

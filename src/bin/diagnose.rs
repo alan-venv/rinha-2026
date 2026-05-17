@@ -5,7 +5,7 @@ use anyhow::Result;
 use rinha::{
     encoding,
     kdtree::KdTree,
-    morton::MortonIndex,
+    morton::Morton,
     parser,
     service::{DecisionSource, Service},
 };
@@ -34,7 +34,7 @@ struct Diagnose {
 }
 
 fn main() -> Result<()> {
-    let index = MortonIndex::load_default()?;
+    let index = Morton::load_default()?;
     let kdtree = KdTree::load_default()?;
     let service = Service::new(index, kdtree);
     let input = File::open("scripts/k6/data.json")?;

@@ -3,7 +3,7 @@ use std::io::Result;
 use mimalloc::MiMalloc;
 use rinha::controller;
 use rinha::kdtree::KdTree;
-use rinha::morton::MortonIndex;
+use rinha::morton::Morton;
 use rinha::service::Service;
 use umbral_socket::stream::UmbralServer;
 
@@ -11,9 +11,9 @@ use umbral_socket::stream::UmbralServer;
 static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<()> {
-    let index = MortonIndex::load_default()?;
+    let morton = Morton::load_default()?;
     let kdtree = KdTree::load_default()?;
-    let service = Service::new(index, kdtree);
+    let service = Service::new(morton, kdtree);
     let socket = socket();
 
     UmbralServer::new(service)

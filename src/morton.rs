@@ -28,13 +28,13 @@ pub struct MortonEntry {
     pub label: u8,
 }
 
-pub struct MortonIndex {
+pub struct Morton {
     mmap: Mmap,
     count: usize,
     window: usize,
 }
 
-impl MortonIndex {
+impl Morton {
     pub fn load_default() -> io::Result<Self> {
         Self::load("resources/index.bin")
     }
