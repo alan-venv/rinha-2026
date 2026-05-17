@@ -17,8 +17,8 @@ fn main() -> Result<()> {
     let socket = socket();
 
     UmbralServer::new(service)
-        .route(controller::FRAUD_SCORE_METHOD, controller::score_handler)
-        .route(controller::READY_METHOD, controller::ready_handler)
+        .route(1, controller::score_handler)
+        .route(2, controller::ready_handler)
         .run(&socket)
 }
 

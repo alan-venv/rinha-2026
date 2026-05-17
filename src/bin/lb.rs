@@ -1,12 +1,11 @@
 use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::time::Duration;
 
 use mio::net::{TcpListener, TcpStream, UnixStream};
 use mio::{Events, Interest, Poll, Token};
-use rinha::controller;
 use umbral_socket::stream::{RESPONSE_HEADER_LEN, UmbralStatus};
 
 const BIND: &str = "0.0.0.0:80";
@@ -15,26 +14,13 @@ const CONNECTIONS_PER_UPSTREAM: usize = 6;
 const READ_BUFFER: usize = 16 * 1024;
 const MAX_HEADER_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 2048;
-const MAX_RESPONSE_BODY_LEN: usize = 64;
+const MAX_RESPONSE_BODY_LEN: usize = 160;
+const REQUEST_HEADER_LEN: usize = 5;
 const SERVER: Token = Token(0);
 const UPSTREAM_START: usize = 1;
 
-const READY_RESPONSE: &[u8] =
-    b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: keep-alive\r\n\r\nI was born ready";
 const ERROR_RESPONSE: &[u8] =
     b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-const BODY_SCORE_0: &[u8] = br#"{"approved":true,"fraud_score":0.0}"#;
-const BODY_SCORE_02: &[u8] = br#"{"approved":true,"fraud_score":0.2}"#;
-const BODY_SCORE_04: &[u8] = br#"{"approved":true,"fraud_score":0.4}"#;
-const BODY_SCORE_06: &[u8] = br#"{"approved":false,"fraud_score":0.6}"#;
-const BODY_SCORE_08: &[u8] = br#"{"approved":false,"fraud_score":0.8}"#;
-const BODY_SCORE_1: &[u8] = br#"{"approved":false,"fraud_score":1.0}"#;
-const RESPONSE_SCORE_0: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
-const RESPONSE_SCORE_02: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
-const RESPONSE_SCORE_04: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
-const RESPONSE_SCORE_06: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
-const RESPONSE_SCORE_08: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
-const RESPONSE_SCORE_1: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\nConnection: keep-alive\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
 
 type Connections = Vec<Option<Connection>>;
 
@@ -53,8 +39,9 @@ struct UpstreamLane {
     token: Token,
     state: LaneState,
     client: Option<Token>,
-    write_buffer: Vec<u8>,
-    write_offset: usize,
+    request_header: [u8; REQUEST_HEADER_LEN],
+    request_body: Vec<u8>,
+    request_offset: usize,
     header: [u8; RESPONSE_HEADER_LEN],
     header_offset: usize,
     response: [u8; MAX_RESPONSE_BODY_LEN],
@@ -73,6 +60,7 @@ enum LaneState {
 
 struct Job {
     client: Token,
+    method: u8,
     body: Vec<u8>,
 }
 
@@ -156,7 +144,7 @@ fn connect_lanes(
     for socket in sockets {
         for _ in 0..lane_count_per_upstream {
             let token = Token(UPSTREAM_START + lanes.len());
-            let mut stream = connect_upstream(&socket)?;
+            let mut stream = connect_upstream(socket)?;
             registry.register(&mut stream, token, Interest::READABLE)?;
             lanes.push(UpstreamLane {
                 stream,
@@ -164,8 +152,9 @@ fn connect_lanes(
                 token,
                 state: LaneState::Idle,
                 client: None,
-                write_buffer: Vec::with_capacity(1024),
-                write_offset: 0,
+                request_header: [0; REQUEST_HEADER_LEN],
+                request_body: Vec::new(),
+                request_offset: 0,
                 header: [0; RESPONSE_HEADER_LEN],
                 header_offset: 0,
                 response: [0; MAX_RESPONSE_BODY_LEN],
@@ -268,7 +257,21 @@ fn process_requests(
 
         match parsed {
             ParsedRequest::Ready => {
-                queue_response(registry, token, connections, READY_RESPONSE, false)?
+                if let Some(connection) = connection_mut(connections, token) {
+                    connection.pending = true;
+                }
+                assign_job(
+                    registry,
+                    lanes,
+                    idle_lanes,
+                    pending_jobs,
+                    Job {
+                        client: token,
+                        method: 2,
+                        body: Vec::new(),
+                    },
+                )?;
+                return update_interest(registry, token, connections);
             }
             ParsedRequest::NotFound | ParsedRequest::BadRequest => {
                 queue_response(registry, token, connections, ERROR_RESPONSE, true)?
@@ -285,6 +288,7 @@ fn process_requests(
                     pending_jobs,
                     Job {
                         client: token,
+                        method: 1,
                         body,
                     },
                 )?;
@@ -311,12 +315,10 @@ fn assign_job(
 
 fn start_lane_job(registry: &mio::Registry, lane: &mut UpstreamLane, job: Job) -> io::Result<()> {
     lane.client = Some(job.client);
-    lane.write_buffer.clear();
-    lane.write_buffer.push(controller::FRAUD_SCORE_METHOD);
-    lane.write_buffer
-        .extend_from_slice(&(job.body.len() as u32).to_be_bytes());
-    lane.write_buffer.extend_from_slice(&job.body);
-    lane.write_offset = 0;
+    lane.request_header[0] = job.method;
+    lane.request_header[1..].copy_from_slice(&(job.body.len() as u32).to_be_bytes());
+    lane.request_body = job.body;
+    lane.request_offset = 0;
     lane.header = [0; RESPONSE_HEADER_LEN];
     lane.header_offset = 0;
     lane.response_offset = 0;
@@ -361,16 +363,26 @@ fn handle_lane_event(
 }
 
 fn flush_lane_write(registry: &mio::Registry, lane: &mut UpstreamLane) -> io::Result<()> {
-    while lane.write_offset < lane.write_buffer.len() {
-        match lane.stream.write(&lane.write_buffer[lane.write_offset..]) {
+    let request_len = REQUEST_HEADER_LEN + lane.request_body.len();
+    while lane.request_offset < request_len {
+        let written = if lane.request_offset < REQUEST_HEADER_LEN {
+            let header = &lane.request_header[lane.request_offset..];
+            let slices = [IoSlice::new(header), IoSlice::new(&lane.request_body)];
+            lane.stream.write_vectored(&slices)
+        } else {
+            let body_offset = lane.request_offset - REQUEST_HEADER_LEN;
+            lane.stream.write(&lane.request_body[body_offset..])
+        };
+
+        match written {
             Ok(0) => break,
-            Ok(written) => lane.write_offset += written,
+            Ok(written) => lane.request_offset += written,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
             Err(error) => return Err(error),
         }
     }
 
-    if lane.write_offset == lane.write_buffer.len() {
+    if lane.request_offset == request_len {
         lane.state = LaneState::ReadingHeader;
         registry.reregister(&mut lane.stream, lane.token, Interest::READABLE)?;
     }
@@ -483,11 +495,12 @@ fn complete_lane(
 
     if let Some(client) = client {
         if status == UmbralStatus::Ok {
-            complete_client_payload(
+            complete_client_bytes(
                 registry,
                 client,
                 connections,
                 &lanes[index].response[..lanes[index].response_len],
+                false,
             )?;
         } else {
             complete_client_bytes(registry, client, connections, ERROR_RESPONSE, true)?;
@@ -523,10 +536,10 @@ fn reconnect_lane(
     }
 
     registry.deregister(&mut lanes[index].stream)?;
-    lanes[index].stream = connect_upstream(&lanes[index].socket)?;
+    lanes[index].stream = connect_upstream(lanes[index].socket)?;
     lanes[index].state = LaneState::Idle;
-    lanes[index].write_buffer.clear();
-    lanes[index].write_offset = 0;
+    lanes[index].request_body.clear();
+    lanes[index].request_offset = 0;
     lanes[index].response_len = 0;
     lanes[index].response_offset = 0;
     registry.register(
@@ -536,22 +549,6 @@ fn reconnect_lane(
     )?;
     idle_lanes.push(index);
     Ok(())
-}
-
-fn complete_client_payload(
-    registry: &mio::Registry,
-    token: Token,
-    connections: &mut Connections,
-    payload: &[u8],
-) -> io::Result<()> {
-    let response = http_response_for_payload(payload).unwrap_or(ERROR_RESPONSE);
-    complete_client_bytes(
-        registry,
-        token,
-        connections,
-        response,
-        response == ERROR_RESPONSE,
-    )
 }
 
 fn complete_client_bytes(
@@ -664,24 +661,6 @@ fn connection_mut(connections: &mut Connections, token: Token) -> Option<&mut Co
 
 fn take_connection(connections: &mut Connections, token: Token) -> Option<Connection> {
     connections.get_mut(token.0)?.take()
-}
-
-fn http_response_for_payload(payload: &[u8]) -> Option<&'static [u8]> {
-    if payload == BODY_SCORE_0 {
-        Some(RESPONSE_SCORE_0)
-    } else if payload == BODY_SCORE_02 {
-        Some(RESPONSE_SCORE_02)
-    } else if payload == BODY_SCORE_04 {
-        Some(RESPONSE_SCORE_04)
-    } else if payload == BODY_SCORE_06 {
-        Some(RESPONSE_SCORE_06)
-    } else if payload == BODY_SCORE_08 {
-        Some(RESPONSE_SCORE_08)
-    } else if payload == BODY_SCORE_1 {
-        Some(RESPONSE_SCORE_1)
-    } else {
-        None
-    }
 }
 
 fn parse_request(buffer: &mut Vec<u8>) -> io::Result<ParsedRequest> {
