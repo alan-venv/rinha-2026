@@ -4,7 +4,7 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main(){}" > src/main.rs
 RUN cargo fetch
 COPY src ./src
-ENV RUSTFLAGS="-C target-cpu=haswell -C target-feature=+avx2"
+ENV RUSTFLAGS="-C target-feature=+avx2"
 RUN cargo build --release --bin rinha --bin lb
 
 FROM gcr.io/distroless/cc-debian13
